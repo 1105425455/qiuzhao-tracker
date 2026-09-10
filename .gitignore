@@ -1,0 +1,13 @@
+# Local user data, secrets and runtime artifacts — never publish
+data/
+.env
+.env.*
+
+# Logs
+*.log
+
+# Test scratch
+.test-runs/
+
+# OS / editor noise
+.DS_Store
