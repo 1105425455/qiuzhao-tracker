@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.12';
+const UI_VERSION = '2026-09-10.13';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }

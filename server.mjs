@@ -469,7 +469,9 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         }
         if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 5000) return fail('未提取到单条记录原文或文本过长');
         const source = new URL(body.url);
-        if (source.origin !== new URL(task.url).origin || looksLikeLogin(source) || !body.text.includes(task.position)) return fail('登录失效、来源改变或岗位不匹配');
+        // Same-origin is enough; do not require the page text to literally repeat
+        // the stored position name (that caused many false "岗位不匹配" failures).
+        if (source.origin !== new URL(task.url).origin || looksLikeLogin(source)) return fail('登录失效或来源改变');
         if (/验证码|密码|身份证|access_token|authorization/i.test(body.text)) return fail('原文可能包含敏感信息，未保留');
         const parsed = progressCandidate(body.text);
         if (parsed.ambiguous || !Object.keys(parsed.candidate).length) {
@@ -499,7 +501,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
           task.candidate = { stage: candidate.stage, screening: candidate.screening }; task.evidence = parsed.evidence; task.method = 'AI 截图'; task.checkedAt = new Date().toISOString();
           noteChecked(task.id, task.checkedAt);
           task.status = candidate.stage === task.before.stage && candidate.screening === task.before.screening ? 'unchanged' : 'changed'; task.message = 'AI 截图候选，等待批量确认';
-        } catch { if (task.status === 'ai-running') { task.status = 'failed'; task.message = '截图识别失败、证据不足或结果不一致，原记录保留'; } }
+        } catch (error) { if (task.status === 'ai-running') { task.status = 'failed'; task.message = `截图识别未通过：${error && error.message ? error.message : '未知原因'}`; log({ event: 'refresh.image.failed', requestId, task: task.id, reason: error && error.message }); } }
         return send(200, { ok: true });
       }
       if (url.pathname === '/api/refresh/apply') {

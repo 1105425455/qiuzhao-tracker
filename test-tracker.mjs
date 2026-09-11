@@ -217,6 +217,19 @@ test('AI image protocol, explicit consent, validation and no key in output', asy
   await assert.rejects(recognizeImage(config, base, 'data:image/png;base64,dGVzdA==', mock));
 });
 
+test('screenshot recognition tolerates position suffixes and punctuation', async () => {
+  const task = { company: '某公司', position: '语音算法工程师' };
+  const replyFor = position => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, stage: '笔试', screening: null, evidence: '当前进度：笔试-未处理', confidence: 'high' }) } }] }), { status: 200 });
+  // Exact, suffixed, and punctuated variants should all match.
+  for (const variant of ['语音算法工程师', '语音算法工程师(J12345)', '语音算法工程师（2027届）', '  语音算法 工程师 ']) {
+    const result = await recognizeImage(config, task, png, async () => replyFor(variant));
+    assert.equal(result.candidate.stage, '笔试', variant);
+  }
+  // A genuinely different position is still rejected.
+  await assert.rejects(recognizeImage(config, task, png, async () => replyFor('多模态算法工程师')));
+  // Low confidence is still rejected.
+  await assert.rejects(recognizeImage(config, task, png, async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position: '语音算法工程师', stage: '笔试', screening: null, evidence: '笔试', confidence: 'low' }) } }] }), { status: 200 })));
+});
 test('model catalog drives the right API shape for Claude and Gemini', async () => {
   assert.equal(apiForModel('claude-opus-5'), 'anthropic');
   assert.equal(apiForModel('gemini-3.8-flash'), 'openai');
