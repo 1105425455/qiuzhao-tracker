@@ -12,10 +12,16 @@ mkdirSync(directory, { recursive: true, mode: 0o700 });
 if (existsSync(registry)) {
   const previous = JSON.parse(readFileSync(registry, 'utf8'));
   if (Number.isSafeInteger(previous.pid) && previous.pid > 1 && previous.entry === entry) {
-    const command = spawnSync('ps', ['-p', String(previous.pid), '-o', 'command='], { encoding: 'utf8' }).stdout.trim();
-    if (command === `${previous.node} ${entry}`) {
+    // Verify the recorded pid is really our server before stopping it. `ps` is
+    // unix-only, so on Windows we skip the identity check and just try SIGTERM,
+    // which Node emulates as a forceful terminate.
+    let command = null;
+    if (process.platform !== 'win32') {
+      command = spawnSync('ps', ['-p', String(previous.pid), '-o', 'command='], { encoding: 'utf8' }).stdout.trim();
+    }
+    if (command === null || command === `${previous.node} ${entry}`) {
       console.log('正在重启本项目登记的台账服务，不处理其他应用。');
-      process.kill(previous.pid, 'SIGTERM');
+      try { process.kill(previous.pid, 'SIGTERM'); } catch { /* already gone */ }
       for (let n = 0; n < 30; n++) {
         try { process.kill(previous.pid, 0); } catch { break; }
         await new Promise(resolve => setTimeout(resolve, 100));

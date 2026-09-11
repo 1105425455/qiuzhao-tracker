@@ -21,8 +21,7 @@
 
 ## 需要准备
 
-- 一台 macOS 电脑（Windows/Linux 也可，命令行启动即可）。
-- [Node.js](https://nodejs.org/) 22 或以上。
+- [Node.js](https://nodejs.org/) 22 或以上（Windows / macOS / Linux 都行）。
 - Edge 浏览器（用于加载采集扩展）。
 - 可选：一个 AI 接口。不配置也能用，只是识别不确定时不会调用 AI。
 
@@ -30,9 +29,10 @@
 
 1. 下载或克隆本项目。
 
-2. 启动本地服务（二选一）：
-   - 双击 `start.command`；
-   - 或命令行运行：
+2. 启动本地服务：
+   - **macOS**：双击 `start.command`；
+   - **Windows**：在本项目文件夹里打开终端（PowerShell），运行 `node launch.mjs`；
+   - **任意系统**：命令行运行：
 
      ```sh
      node launch.mjs
@@ -77,14 +77,17 @@
 ## 目录说明
 
 ```
-launch.mjs        启动脚本
+launch.mjs        启动脚本（校验端口并托管 server.mjs）
+start.command     macOS 双击启动
 server.mjs        本地服务与 API
 app.js / index.html / style.css   网页界面
 model.mjs         记录与状态规则
 ai.mjs / models.mjs   AI 接入与模型预设
-calendar*.mjs     日历与日程
+calendar.mjs / calendar-ui.mjs     日历与日程
+bridge.mjs        网页与扩展的握手
 extension/        Edge 采集扩展（规则优先 + 整页截图 AI 兜底）
 vendor/           本地化的第三方库（FullCalendar / Lucide / Papa Parse）
+test-tracker.mjs  离线测试（node --test）
 docs/screenshots/ 界面截图
 ```
 
