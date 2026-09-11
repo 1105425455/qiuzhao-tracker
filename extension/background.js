@@ -18,14 +18,26 @@ async function connection() {
     const result = await response.json(); if (!response.ok) throw new Error(result.error || '本地服务不可用'); return result;
   } };
 }
+const LOGIN_RE = /([?&#]|^|\/)(login|signin|sign-in|signon|sso|passport)([=/?#]|$)/i;
 async function visit(tabId, url) {
   const target = new URL(url);
   if (!['http:', 'https:'].includes(target.protocol) || target.username || target.password) throw new Error('仅支持 HTTP/HTTPS 招聘投递页，请检查网址');
   if ((await chrome.tabs.get(tabId)).active) throw new Error('采集标签页正在前台使用，停止本条以免打断操作');
-  await chrome.tabs.update(tabId, { url, active: false });
-  for (let n = 0; n < 12; n++) { await wait(1000); if ((await chrome.tabs.get(tabId)).status === 'complete') break; }
-  const actual = await chrome.tabs.get(tabId);
-  if (new URL(actual.url).origin !== target.origin) throw new Error('页面转到了登录或其他来源，请先完成登录');
+  // Navigate with one retry: a rejected or aborted navigation is usually a
+  // transient race between concurrent background tabs, not a login problem.
+  let lastError = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await chrome.tabs.update(tabId, { url, active: false }); }
+    catch (error) { lastError = error?.message || '导航被拒绝'; await wait(600); continue; }
+    for (let n = 0; n < 15; n++) { await wait(1000); if ((await chrome.tabs.get(tabId)).status === 'complete') break; }
+    const actual = await chrome.tabs.get(tabId);
+    let placed;
+    try { placed = new URL(actual.url); } catch { throw new Error(`页面地址无效：${actual.url}`); }
+    if (LOGIN_RE.test(`${placed.pathname}${placed.search}${placed.hash}`)) throw new Error(`页面要求登录：${placed.origin}${placed.pathname}，请在该浏览器完成登录后重试`);
+    if (placed.origin !== target.origin) throw new Error(`页面跳到了其他站点：${placed.origin}${placed.pathname}`);
+    return placed.href;
+  }
+  throw new Error(`页面打开失败：${lastError || '导航被浏览器拒绝'}`);
 }
 async function scan(tabId, func, args = [], { waitFor, timeoutMs = 15000, allFrames = false } = {}) {
   const deadline = Date.now() + timeoutMs;
@@ -130,29 +142,33 @@ async function run() {
     if (selfTest) { const tab = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = tab.id; await selfCheck(api, endpoint, tab.id, selfTest); }
     if (page) await collectPage(api, page);
     if (tasks.length) {
-      if (tabId == null) { const tab = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = tab.id; }
-      const tab = { id: tabId };
+      const total = tasks.length;
       const cancelled = () => isStale();
       let completed = 0;
+      // Each task gets its own background tab, so concurrent workers never fight
+      // over one tab (which caused "Navigation rejected" before).
       const worker = async () => {
         while (!cancelled()) {
           const task = tasks.shift();
           if (!task) return;
-          message = `正在并发核对 ${Math.min(completed + 1, tasks.length + completed)}/${tasks.length + completed}：${task.company}`;
-        try {
-          await visit(tab.id, task.url);
-          const data = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), timeoutMs: 20000 });
-          const dataFp = await pageFingerprint(data);
-          const reply = await api('/api/refresh/result', { batchId, id: task.id, ...data });
-          if (reply.needsAI) {
-            const before = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
-            if ((before.error && !before.fallbackAllowed) || before.url !== data.url || await pageFingerprint(before) !== dataFp) throw new Error('截图前页面变化，重新匹配');
-            const image = await screenshot(tab.id);
-            const after = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
-            if ((after.error && !after.fallbackAllowed) || after.url !== data.url || await pageFingerprint(after) !== dataFp) throw new Error('截图期间页面变化，改用当前页面');
-            await api('/api/refresh/image', { batchId, id: task.id, url: data.url, image });
-          }
-        } catch (error) { await api('/api/refresh/result', { batchId, id: task.id, error: error.message }).catch(() => {}); }
+          let tab = null;
+          message = `正在并发核对 ${completed + 1}/${total}：${task.company}`;
+          try {
+            tab = await chrome.tabs.create({ url: 'about:blank', active: false });
+            await visit(tab.id, task.url);
+            const data = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), timeoutMs: 20000 });
+            const dataFp = await pageFingerprint(data);
+            const reply = await api('/api/refresh/result', { batchId, id: task.id, ...data });
+            if (reply.needsAI) {
+              const before = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+              if ((before.error && !before.fallbackAllowed) || before.url !== data.url || await pageFingerprint(before) !== dataFp) throw new Error('截图前页面变化，重新匹配');
+              const image = await screenshot(tab.id);
+              const after = await scan(tab.id, scanPage, [task.position], { waitFor: new RegExp(task.position.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')) });
+              if ((after.error && !after.fallbackAllowed) || after.url !== data.url || await pageFingerprint(after) !== dataFp) throw new Error('截图期间页面变化，改用当前页面');
+              await api('/api/refresh/image', { batchId, id: task.id, url: data.url, image });
+            }
+          } catch (error) { await api('/api/refresh/result', { batchId, id: task.id, error: error.message }).catch(() => {}); }
+          finally { if (tab) { try { await chrome.tabs.remove(tab.id); } catch {} } }
           completed++;
         }
       };
