@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.17';
+const UI_VERSION = '2026-09-10.18';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -128,12 +128,18 @@ function recordCard(company, items) {
 }
 function render() {
   const records = filtered();
-  $('navCount').textContent = state.records.length; $('filteredCount').textContent = records.length; $('tableCount').textContent = `${records.length} 条记录 · ${state.records.length ? new Set(records.map(r => r.company)).size : 0} 家公司`;   $('saveState').textContent = `本地已保存 · 版本 ${state.revision} · 界面 ${UI_VERSION}`;
-  $('recordRows').innerHTML = stageSections(records).map(([stage, items]) => `
-    <section class="stage-section">
-      <h3 class="stage-title">${esc(stage)}<span class="stage-count">${items.length}</span></h3>
-      ${companyGroups(items).map(([company, group]) => recordCard(company, group)).join('')}
-    </section>`).join('');
+  $('navCount').textContent = state.records.length; $('filteredCount').textContent = records.length; $('tableCount').textContent = `${records.length} 条记录 · ${new Set(records.map(r => r.company)).size} 家公司`;   $('saveState').textContent = `本地已保存 · 版本 ${state.revision} · 界面 ${UI_VERSION}`;
+  // Only section by stage when sorting BY stage; other sort fields apply globally.
+  const byStage = $('sortOrder').value === 'stage';
+  if (byStage) {
+    $('recordRows').innerHTML = stageSections(records).map(([stage, items]) => `
+      <section class="stage-section">
+        <h3 class="stage-title">${esc(stage)}<span class="stage-count">${items.length}</span></h3>
+        ${companyGroups(items).map(([company, group]) => recordCard(company, group)).join('')}
+      </section>`).join('');
+  } else {
+    $('recordRows').innerHTML = companyGroups(records).map(([company, group]) => recordCard(company, group)).join('');
+  }
   $('emptyState').hidden = records.length > 0; $('emptyTitle').textContent = state.records.length ? '没有匹配的记录' : '还没有投递记录'; $('emptyAdd').hidden = state.records.length > 0;
   const due = scheduledEvents(state.records, state.events).filter(event => event.status === '待进行');
   $('scheduleCount').textContent = `${due.length} 项安排`;
