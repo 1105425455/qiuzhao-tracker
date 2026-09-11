@@ -31,7 +31,10 @@ function sortRecords(records) {
     'applied-asc': (a, b) => (a.applyTime || '9').localeCompare(b.applyTime || '9') || byRank(a, b),
     company: (a, b) => a.company.localeCompare(b.company, 'zh-CN') || byRank(a, b),
     stage: (a, b) => (STAGE_ORDER[a.stage] ?? 9) - (STAGE_ORDER[b.stage] ?? 9) || byRank(a, b),
-    screening: (a, b) => (SCREEN_ORDER[a.screening] ?? 9) - (SCREEN_ORDER[b.screening] ?? 9) || byRank(a, b)
+    screening: (a, b) => (SCREEN_ORDER[a.screening] ?? 9) - (SCREEN_ORDER[b.screening] ?? 9) || byRank(a, b),
+    // Never-checked records sort first (empty string), so "what haven't I looked at" is on top.
+    checked: (a, b) => (a.lastCheckedAt || '').localeCompare(b.lastCheckedAt || '') || byRank(a, b),
+    'checked-desc': (a, b) => (b.lastCheckedAt || '').localeCompare(a.lastCheckedAt || '') || byRank(a, b)
   };
   return [...records].sort(comparators[mode] || comparators.updated);
 }
@@ -91,6 +94,9 @@ function grouped(records) {
     if (mode === 'applied-asc') return (a.reduce((m, r) => (r.applyTime && r.applyTime < m) ? r.applyTime : m, '9')).localeCompare(b.reduce((m, r) => (r.applyTime && r.applyTime < m) ? r.applyTime : m, '9'));
     if (mode === 'stage') return (STAGE_ORDER[first(a).stage] ?? 9) - (STAGE_ORDER[first(b).stage] ?? 9);
     if (mode === 'screening') return (SCREEN_ORDER[first(a).screening] ?? 9) - (SCREEN_ORDER[first(b).screening] ?? 9);
+    // earliest check time in the group decides the order; unchecked (empty) first
+    if (mode === 'checked') return (a.reduce((m, r) => (r.lastCheckedAt || '') < m ? (r.lastCheckedAt || '') : m, '\uffff')).localeCompare(b.reduce((m, r) => (r.lastCheckedAt || '') < m ? (r.lastCheckedAt || '') : m, '\uffff'));
+    if (mode === 'checked-desc') return (b.reduce((m, r) => (r.lastCheckedAt || '') > m ? r.lastCheckedAt : m, '')).localeCompare(a.reduce((m, r) => (r.lastCheckedAt || '') > m ? r.lastCheckedAt : m, ''));
     return (b.reduce((m, r) => (r.updatedAt || '') > m ? r.updatedAt : m, '')).localeCompare(a.reduce((m, r) => (r.updatedAt || '') > m ? r.updatedAt : m, ''));
   });
   return groups;

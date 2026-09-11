@@ -389,13 +389,17 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         revision({ baseRevision: job.baseRevision });
         if (!Array.isArray(body.rows) || !body.rows.length || body.rows.length > job.rows.length) throw new Error('请选择要保存的投递');
         const used = new Set(), records = [...state.records];
+        const checkedAt = new Date().toISOString();
         for (const input of body.rows) {
           const row = job.rows.find(row => row.index === input.index);
           if (!row || row.action === 'conflict' || used.has(input.index)) throw new Error('候选重复或身份不明确，请人工核对');
           used.add(input.index);
           const before = row.targetId ? state.records.find(record => record.id === row.targetId) : null;
-          const record = normalize({ ...before, ...row.record, company: input.company, position: input.position, applyTime: input.applyTime, stage: input.stage, screening: input.screening, id: before?.id || randomUUID(), ...(before ? { notes: before.notes, nextDate: before.nextDate, nextAction: before.nextAction, resumeVersion: before.resumeVersion } : {}) });
+          // The values were just read from the official page, so this import also
+          // counts as a check — record the time instead of leaving it "未核对".
+          const record = normalize({ ...before, ...row.record, company: input.company, position: input.position, applyTime: input.applyTime, stage: input.stage, screening: input.screening, lastCheckedAt: checkedAt, id: before?.id || randomUUID(), ...(before ? { notes: before.notes, nextDate: before.nextDate, nextAction: before.nextAction, resumeVersion: before.resumeVersion } : {}) });
           const updated = stamp(record, before, '官网投递列表解析：用户确认');
+          noteChecked(updated.id, checkedAt);
           if (before) records[records.findIndex(item => item.id === before.id)] = updated; else records.push(updated);
         }
         const saved = save(records); job.status = 'imported'; job.cards = []; job.message = `已保存 ${used.size} 条投递`; return send(200, saved);

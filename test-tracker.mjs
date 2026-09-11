@@ -420,6 +420,8 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
     assert.equal((await req('/api/state')).data.records.length, 1);
     state = (await req('/api/pages/apply', { id: job.id, rows: preview.rows.map(row => ({ index: row.index, ...row.record })), confirmed: true })).data;
     assert.equal(state.records.length, 2); assert.equal(state.records[0].stage, '二面'); assert.equal(state.records[0].notes, '保留手动备注'); assert.equal(state.records[0].nextAction, '联系HR');
+    // A freshly imported row counts as checked, so it is not left as 未核对.
+    assert(state.records.every(r => typeof r.lastCheckedAt === 'string' && r.lastCheckedAt.length > 0));
     // After saving, a reset clears the finished job so the dialog does not
     // re-show the previous results on the next open.
     const reset = (await req('/api/pages/reset', { baseRevision: state.revision })).data;
