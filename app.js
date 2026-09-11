@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.16';
+const UI_VERSION = '2026-09-10.17';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -20,10 +20,10 @@ $('formRank').insertAdjacentHTML('afterbegin', '<option value="">未标注</opti
 $('seasonYear').textContent = new Date().getFullYear();
 $('sortDir').dataset.dir = 'desc';
 $('today').textContent = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
-const STAGE_ORDER = { '待投递': 0, '已投递': 1, '笔试': 2, '面试中': 3, '一面': 4, '二面': 5, '终面': 6, 'Offer': 7, '已结束': 8, '已撤回': 9 };
-const SCREEN_ORDER = { '未投递': 0, '待反馈': 1, '通过': 2, '未通过': 3 };
+const STAGE_ORDER = { '简历筛选中': 0, '笔试': 1, '面试': 2, 'Offer': 3, '已结束': 4, '已撤回': 5 };
+const SCREEN_ORDER = { '待反馈': 0, '通过': 1, '未通过': 2 };
 // Group headings shown above the list, in a fixed, easy-to-scan order.
-const STAGE_GROUPS = ['面试中', '一面', '二面', '终面', 'Offer', '笔试', '已投递', '待投递', '已结束', '已撤回'];
+const STAGE_GROUPS = ['面试', 'Offer', '笔试', '简历筛选中', '已结束', '已撤回'];
 const sortDir = () => ($('sortDir').dataset.dir === 'asc' ? 1 : -1);
 function sortRecords(records) {
   const field = $('sortOrder').value;
@@ -43,10 +43,10 @@ function sortRecords(records) {
 }
 function filtered() {
   const query = $('search').value.toLowerCase().trim();
-  const matched = state.records.filter(r => (!query || [r.company, r.position, r.resumeVersion].join(' ').toLowerCase().includes(query)) && (!$('directionFilter').value || r.direction === $('directionFilter').value) && (!$('stageFilter').value || r.stage === $('stageFilter').value) && (!$('screenFilter').value || r.screening === $('screenFilter').value) && (view !== 'interview' || ['笔试', '面试中', '一面', '二面', '终面'].includes(r.stage)));
+  const matched = state.records.filter(r => (!query || [r.company, r.position, r.resumeVersion].join(' ').toLowerCase().includes(query)) && (!$('directionFilter').value || r.direction === $('directionFilter').value) && (!$('stageFilter').value || r.stage === $('stageFilter').value) && (!$('screenFilter').value || r.screening === $('screenFilter').value) && (view !== 'interview' || ['笔试', '面试'].includes(r.stage)));
   return sortRecords(matched);
 }
-function badge(value, stage = false) { const type = value === '通过' ? 'pass' : value === '未通过' ? 'fail' : value === '待反馈' ? 'pending' : value === 'Offer' ? 'offer' : stage && !['待投递', '已结束', '已撤回'].includes(value) ? 'stage' : ''; return `<span class="badge ${type}">${esc(value)}</span>`; }
+function badge(value, stage = false) { const type = value === '通过' ? 'pass' : value === '未通过' ? 'fail' : value === '待反馈' ? 'pending' : value === 'Offer' ? 'offer' : stage && !['已结束', '已撤回'].includes(value) ? 'stage' : ''; return `<span class="badge ${type}">${esc(value)}</span>`; }
 // Keep only the meaningful status phrase from raw page text, dropping repeated
 // job titles, counts and dates so the cell stays short.
 function rawStatusLine(raw) {
@@ -68,15 +68,10 @@ function stageQualifier(raw, stage) {
 // A clean status: one badge plus at most one short line. Never repeats itself.
 function statusCell(r) {
   const raw = rawStatusLine(r.rawStatus);
-  if (r.stage === '待投递') return { badge: badge('待投递', true), note: '' };
   if (r.screening === '未通过') return { badge: badge('简历未通过'), note: '' };
-  if (r.screening === '通过' && r.stage === 'Offer') return { badge: badge('Offer', true), note: '' };
-  if (r.screening === '通过' && r.stage === '已投递') return { badge: badge('简历通过'), note: '' };
-  if (r.screening === '通过') return { badge: badge(r.stage, true), note: '简历通过' };
-  if (r.stage === '已投递') {
-    const note = /初筛|筛选/.test(raw) ? '' : '简历筛选中';
-    return { badge: badge(raw || '简历筛选中'), note };
-  }
+  // The stage itself already means "简历筛选中", so don't repeat it as a note.
+  if (r.stage === '简历筛选中') return { badge: badge('简历筛选中'), note: r.screening === '通过' ? '简历通过' : '' };
+  if (r.screening === '通过' && r.stage !== 'Offer') return { badge: badge(r.stage, true), note: '简历通过' };
   const qualifier = stageQualifier(raw, r.stage);
   return { badge: badge(r.stage, true), note: qualifier && qualifier !== r.stage ? qualifier : '' };
 }
@@ -201,7 +196,7 @@ function openRecord(id = '') {
 }
 $('newRecord').onclick = () => ['interview', 'schedule'].includes(view) ? calendarUI.openEvent() : openRecord();
 $('emptyAdd').onclick = () => openRecord();
-$('formStage').onchange = () => { const fields = $('recordForm').elements; if ($('formStage').value === '待投递') { fields.screening.value = '未投递'; fields.applyTime.value = ''; } else if (fields.screening.value === '未投递') fields.screening.value = '待反馈'; };
+$('formStage').onchange = () => { const fields = $('recordForm').elements; if (fields.screening.value === '未投递') fields.screening.value = '待反馈'; };
 $('formScreening').onchange = () => { if ($('formScreening').value === '未通过') $('formStage').value = '已结束'; };
 $('recordForm').onsubmit = async event => {
   event.preventDefault(); const formRecord = Object.fromEntries(new FormData(event.target)); const before = state.records.find(r => r.id === formRecord.id); const record = { ...before, ...formRecord }; $('recordError').textContent = '';
@@ -295,7 +290,7 @@ async function refreshPageJob() {
     const key = `${pageJob.id}:${pageJob.status}`;
     if (terminal && pageRendered !== key) {
       pageRendered = key;
-      $('pageRows').innerHTML = pageJob.rows.map(row => `<tr data-index="${row.index}"><td><input type="checkbox" data-save ${row.action === 'conflict' ? 'disabled' : 'checked'} aria-label="保存此岗位"></td><td><input data-field="company" value="${esc(row.record.company)}" aria-label="公司"></td><td><input data-field="position" value="${esc(row.record.position)}" aria-label="岗位"><span class="cell-secondary">${esc(row.record.rawStatus)}</span></td><td><input type="date" data-field="applyTime" value="${esc(row.record.applyTime)}" aria-label="投递日期"></td><td><select data-field="stage" aria-label="步骤">${STAGES.filter(s => s !== '待投递').map(s => `<option ${s === row.record.stage ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><select data-field="screening" aria-label="简历结果">${SCREENINGS.filter(s => s !== '未投递').map(s => `<option ${s === row.record.screening ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td>${{ add: '新增', update: '更新已有', conflict: '身份待核对，不覆盖' }[row.action]}</td></tr>`).join('');
+      $('pageRows').innerHTML = pageJob.rows.map(row => `<tr data-index="${row.index}"><td><input type="checkbox" data-save ${row.action === 'conflict' ? 'disabled' : 'checked'} aria-label="保存此岗位"></td><td><input data-field="company" value="${esc(row.record.company)}" aria-label="公司"></td><td><input data-field="position" value="${esc(row.record.position)}" aria-label="岗位"><span class="cell-secondary">${esc(row.record.rawStatus)}</span></td><td><input type="date" data-field="applyTime" value="${esc(row.record.applyTime)}" aria-label="投递日期"></td><td><select data-field="stage" aria-label="步骤">${STAGES.map(s => `<option ${s === row.record.stage ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td><select data-field="screening" aria-label="简历结果">${SCREENINGS.map(s => `<option ${s === row.record.screening ? 'selected' : ''}>${s}</option>`).join('')}</select></td><td>${{ add: '新增', update: '更新已有', conflict: '身份待核对，不覆盖' }[row.action]}</td></tr>`).join('');
     }
   } catch (error) { $('pageError').textContent = error.message; }
 }

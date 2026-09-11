@@ -1,5 +1,5 @@
-export const STAGES = ['待投递', '已投递', '笔试', '面试中', '一面', '二面', '终面', 'Offer', '已结束', '已撤回'];
-export const SCREENINGS = ['未投递', '待反馈', '通过', '未通过'];
+export const STAGES = ['简历筛选中', '笔试', '面试', 'Offer', '已结束', '已撤回'];
+export const SCREENINGS = ['待反馈', '通过', '未通过'];
 export const DIRECTIONS = ['语音算法', '多模态算法', '图像算法', '大模型算法', '推荐搜索', '通用算法', '其他'];
 // Ordered keyword classifier shared by rule parsing and AI extraction.
 export function classifyDirection(text) {
@@ -27,8 +27,8 @@ export function normalize(record) {
   }
   if (!out.company || !out.position) throw new Error('请填写公司和岗位');
   out.direction ||= '其他';
-  out.stage ||= '待投递';
-  out.screening ||= out.stage === '待投递' ? '未投递' : '待反馈';
+  out.stage ||= '简历筛选中';
+  out.screening ||= '待反馈';
   if (!DIRECTIONS.includes(out.direction) || !STAGES.includes(out.stage) || !SCREENINGS.includes(out.screening)) throw new Error('方向、阶段或筛选结果不在可选范围内');
   if (out.rank && !RANKS.includes(out.rank) && !/^第[1-9]志愿$/.test(out.rank)) throw new Error('志愿标签格式不正确');
   if (out.id && !/^[a-zA-Z0-9_-]{1,100}$/.test(out.id)) throw new Error('记录 ID 格式不正确');
@@ -43,8 +43,6 @@ export function normalize(record) {
     if ([...url.searchParams.keys()].some(key => /token|password|secret|authorization/i.test(key))) throw new Error('网址不能包含登录凭证');
   }
   if (out.sourceUid && !/^[\w.:-]{1,200}$/.test(out.sourceUid)) throw new Error('官网申请编号格式不正确');
-  if (out.stage !== '待投递' && out.screening === '未投递') throw new Error('已投递记录须填写筛选状态；不知道投递日期可以留空');
-  if (out.stage === '待投递' && (out.screening !== '未投递' || out.applyTime)) throw new Error('待投递记录不能填写已投递日期或筛选结果');
   if (out.screening === '未通过' && out.stage !== '已结束') throw new Error('简历未通过的记录，请将阶段设为已结束');
   return out;
 }
@@ -73,26 +71,28 @@ export function progressCandidate(text) {
   const current = lines.filter(s => /(当前状态|最新状态|当前进度|进度|状态)[：:]/.test(s)).map(s => s.replace(/^[^：:]*[：:]\s*/, ''));
   const scope = current.length ? current : lines;
   const screening = screeningCandidate(scope.join('\n'));
-  // Each stage is a set of keywords; whichever appears in the current status wins.
-  const rules = [
+  // A step NAME alone (投递简历 / 简历筛选 / 面试 / Offer / 入职) is just a progress
+  // bar label, not the current status. Only count a stage when it carries a real
+  // state word, and never count a step explicitly marked 已完成/已通过.
+  const stagePatterns = [
     ['已撤回', /已撤回|撤销申请|主动撤回/],
-    ['已结束', /流程结束|已结束|职位关闭|岗位关闭|招聘结束|已终止/],
-    ['Offer', /offer|录用|已录用|拟录用|offer意向/i],
-    ['终面', /终面|总监面|hr面|终试/],
-    ['二面', /二面|复试|第二轮面/],
-    ['一面', /一面|初试|第一轮面/],
-    ['面试中', /面试|面试中|安排面试|待面试/],
-    ['笔试', /笔试|测评|在线考试|机考|笔试中|待笔试/],
-    ['已投递', /已投递|简历投递|投递成功|申请成功|待筛选|筛选中|评估中|初筛|待处理/]
+    ['已结束', /流程结束|已结束|职位关闭|岗位关闭|招聘结束|已终止|未通过|不合适/],
+    ['Offer', /(已?收到|拿到|获得|接受)?\s*(offer|录用|拟录用|offer意向)/i],
+    ['面试', /面试(中|邀|安排|进行|待|通知)|一面|二面|三面|终面|复试|初试|总监面|hr面|终试/],
+    ['笔试', /笔试[\s\-—·:：]?(中|邀|安排|进行|待|通知|未处理|已完成|完成)?|测评[\s\-—·:：]?(中|邀|进行|已完成|完成)?|在线考试|机考/],
+    ['简历筛选中', /已投递|简历投递|投递成功|申请成功|待筛选|筛选中|初筛|评估中|待处理|已申请/]
   ];
   const stages = [];
   for (const value of scope) {
-    for (const [stage, re] of rules) {
+    // Skip lines that describe an already-completed or not-yet-reached step, but a
+    // completed 笔试/测评 is a real, current stage — keep those.
+    if (/已完成|已通过|未开始|待开始/.test(value) && !/笔试|测评|offer|录用|通过|不通过|未通过/i.test(value)) continue;
+    for (const [stage, re] of stagePatterns) {
       if (re.test(value) && !stages.includes(stage)) stages.push(stage);
     }
   }
   // Keep only the most advanced stage when several match a single status line.
-  const order = ['已撤回', '已结束', 'Offer', '终面', '二面', '一面', '面试中', '笔试', '已投递'];
+  const order = ['已撤回', '已结束', 'Offer', '面试', '笔试', '简历筛选中'];
   const ranked = order.filter(s => stages.includes(s));
   const chosen = ranked.length ? [ranked[0]] : [];
   const ambiguous = screening.ambiguous || (screening.screening === '未通过' && chosen.some(s => s !== '已结束'));
@@ -104,9 +104,9 @@ export function progressCandidate(text) {
     // Rejection wording implies the application ended.
     if (!candidate.stage && /已拒绝|未入选/.test(scope.join('\n'))) candidate.stage = '已结束';
     // A screening result implies the application was at least submitted.
-    if (!candidate.stage && candidate.screening && candidate.screening !== '未通过') candidate.stage = '已投递';
+    if (!candidate.stage && candidate.screening && candidate.screening !== '未通过') candidate.stage = '简历筛选中';
   }
-  const evidence = scope.filter(s => rules.some(([, re]) => re.test(s)) || /简历|进度|状态|投递/.test(s)).join('\n');
+  const evidence = scope.filter(s => stagePatterns.some(([, re]) => re.test(s)) || /简历|进度|状态|投递/.test(s)).join('\n');
   return { candidate, ambiguous, evidence };
 }
 

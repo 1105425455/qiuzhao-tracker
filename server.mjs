@@ -25,7 +25,7 @@ const files = new Map([
   ['/vendor/fullcalendar-zh-cn.js', ['vendor/fullcalendar-zh-cn.js', 'text/javascript']]
 ]);
 const aliases = { recordId: 'id', status: 'stage', platform: 'source', interviewTime: 'nextDate', 公司: 'company', 岗位名称: 'position', 岗位: 'position', 投递时间: 'applyTime', 当前状态: 'stage', 简历筛选结果: 'screening', 岗位链接: 'url', 简历版本: 'resumeVersion', 方向: 'direction', 工作地点: 'location', 备注: 'notes', 志愿: 'rank', 项目: 'program' };
-const legacyStages = { 筛选中: '已投递', '笔试/测评': '笔试' };
+const legacyStages = { 筛选中: '简历筛选中', 已投递: '简历筛选中', 待投递: '简历筛选中', 面试中: '面试', 一面: '面试', 二面: '面试', 终面: '面试', '笔试/测评': '笔试' };
 const signature = record => JSON.stringify([record.company, record.position, record.applyTime, record.url]);
 // A single-page app may append a slash, a hash route or sub-path after load, so
 // accept the same origin when the requested path is a prefix of the current one.
@@ -59,7 +59,7 @@ export function importPreview(csv, existing) {
     try {
       const mappedRow = {};
       for (const [key, value] of Object.entries(row)) mappedRow[aliases[key] || key] = value;
-      mappedRow.stage = legacyStages[mappedRow.stage] || mappedRow.stage || (mappedRow.applyTime ? '已投递' : '待投递');
+      mappedRow.stage = legacyStages[mappedRow.stage] || mappedRow.stage || '简历筛选中';
       if (mappedRow.priority) mappedRow.notes = `${mappedRow.notes || ''}\n优先级：${mappedRow.priority}`.trim();
       const record = normalize(mappedRow);
       if (record.id && known.has(record.id)) {
@@ -84,21 +84,30 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
   if (!Array.isArray(state.records) || !Number.isSafeInteger(state.revision)) throw new Error('本地台账损坏，停止写入；请保留原文件');
   state.events ??= [];
   if (!Array.isArray(state.events)) throw new Error('本地日程损坏，停止写入；请保留原文件');
-  for (const record of state.records) normalize(record);
-  // One-time-safe reclassify: older rows stored before the direction classifier
-  // was widened may sit in "其他". Recompute from the position; keep user value
-  // only when the classifier still cannot tell.
-  let reclassified = 0;
+  // One-time-safe migrations for older data, run BEFORE validation so legacy
+  // stage/screening values do not fail normalize().
+  //  a) widen direction when it was left as 其他
+  //  b) collapse the old multi-round stages (一面/二面/终面/面试中) to 面试 and
+  //     the old 已投递/待投递 to 简历筛选中, and the old 未投递 screening value.
+  const stageMerge = { 已投递: '简历筛选中', 待投递: '简历筛选中', 面试中: '面试', 一面: '面试', 二面: '面试', 终面: '面试', 已通过: '面试' };
+  const screenMerge = { 未投递: '待反馈' };
+  let migratedCount = 0;
   for (const record of state.records) {
-    if (record.direction !== '其他') continue;
-    const guess = classifyDirection(`${record.position} ${record.company}`);
-    if (guess !== '其他') { record.direction = guess; reclassified++; }
+    if (record.direction === '其他') {
+      const guess = classifyDirection(`${record.position} ${record.company}`);
+      if (guess !== '其他') { record.direction = guess; migratedCount++; }
+    }
+    if (stageMerge[record.stage]) { record.stage = stageMerge[record.stage]; migratedCount++; }
+    if (screenMerge[record.screening]) { record.screening = screenMerge[record.screening]; migratedCount++; }
+    if (record.screening === '未通过' && record.stage !== '已结束') { record.stage = '已结束'; migratedCount++; }
   }
-  if (reclassified) {
+  if (migratedCount) {
     const migrated = { records: state.records, events: state.events ?? [], revision: state.revision + 1 };
     writeFileSync(join(dataDir, `revision-${migrated.revision}.json`), JSON.stringify(migrated, null, 2), { flag: 'wx', mode: 0o600 });
     state = migrated;
   }
+  // Validate only after migration, so any remaining invalid value is a real error.
+  for (const record of state.records) normalize(record);
   for (const event of state.events) normalizeEvent(event);
   const pairToken = randomBytes(24).toString('hex');
   const configPath = join(dataDir, 'llm-config.json');
@@ -294,7 +303,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         test.status = 'running'; test.message = '浏览器检查通过，正在核验 800px 测试截图';
         try {
           const recognized = await recognizeImage({ ...provider(), enabled: true }, { company: '本地自检', position: '浏览器自检岗位' }, body.image, fetchAI);
-          if (recognized.candidate.stage !== '二面' || selfTest !== test) throw new Error('自检结果不符');
+          if (!['面试','面试中','二面'].includes(recognized.candidate.stage) || selfTest !== test) throw new Error('自检结果不符');
           const proof = { at: new Date().toISOString(), extensionVersion: bridge.version, checks: Object.fromEntries(required.map(key => [key, true])), imageRecognition: true, realRecruitmentSiteValidated: false };
           writeFileSync(join(dataDir, `acceptance-${test.id}.json`), JSON.stringify(proof, null, 2), { flag: 'wx', mode: 0o600 });
           if (aiConfig) aiConfig.enabled = true;
@@ -335,7 +344,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
           if (card.group || !job.company || !card.position || !card.text.includes(card.position) || parsed.ambiguous || !Object.keys(parsed.candidate).length) continue;
           const date = card.text.match(/(?:投递|申请|应聘)时间\s*[：:]?\s*(\d{4}-\d{2}-\d{2})/)?.[1] || '';
           try {
-            const record = normalize({ company: job.company, position: card.position, applyTime: date, stage: parsed.candidate.stage || '已投递', screening: parsed.candidate.screening || '待反馈', url: job.url, rawStatus: parsed.evidence, source: '官网列表规则', sourceUid: card.uid, direction: classifyDirection(card.position) });
+            const record = normalize({ company: job.company, position: card.position, applyTime: date, stage: parsed.candidate.stage || '简历筛选中', screening: parsed.candidate.screening || '待反馈', url: job.url, rawStatus: parsed.evidence, source: '官网列表规则', sourceUid: card.uid, direction: classifyDirection(card.position) });
             ruleRows.push({ index, record });
           } catch { /* Ambiguous or inconsistent records are reviewed with the whole-page image. */ }
         }
@@ -441,8 +450,8 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         batchResult();
         if (batch && !batch.applied && batch.tasks.some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status))) throw new Error('已有核对任务进行中，请先等待或结束本轮');
         const requestedIds = Array.isArray(body.ids) ? new Set(body.ids.filter(id => typeof id === 'string')) : null;
-        const records = state.records.filter(r => r.stage !== '待投递' && (!requestedIds || requestedIds.has(r.id)));
-        if (!records.length) throw new Error('目前没有已投递记录，请先新增或导入台账');
+        const records = state.records.filter(r => !requestedIds || requestedIds.has(r.id));
+        if (!records.length) throw new Error('目前没有可核对的记录，请先新增或导入台账');
         batch = { id: randomUUID(), at: new Date().toISOString(), baseRevision: state.revision, applied: false, allowAI: provider().enabled === true, tasks: records.map(r => {
           let message = '';
           if (!r.url) message = '未填写官网进度网址';
@@ -554,7 +563,9 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         const preview = importPreview(body.csv, state.records);
         if (preview.errors.length) throw new Error(preview.errors.join('\n'));
         if (!preview.records.length) throw new Error('没有可新增的记录');
-        return send(200, save([...state.records, ...preview.records.map(r => stamp(r))]));
+        // Normalize before saving so defaults (stage/screening) are persisted, not
+        // re-derived on every startup (which would keep bumping the revision).
+        return send(200, save([...state.records, ...preview.records.map(r => stamp(normalize(r)))]));
       }
       if (url.pathname === '/api/records') {
         revision(body);

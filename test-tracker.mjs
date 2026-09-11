@@ -14,7 +14,7 @@ import { fitImage } from './extension/image.js';
 import { stableFingerprint } from './extension/fingerprint.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const base = { company: '测试公司', position: '语音算法', applyTime: '2026-09-01', stage: '已投递', screening: '待反馈', direction: '语音算法', url: 'https://iflytek.zhiye.com/campus/jobs' };
+const base = { company: '测试公司', position: '语音算法', applyTime: '2026-09-01', stage: '简历筛选中', screening: '待反馈', direction: '语音算法', url: 'https://iflytek.zhiye.com/campus/jobs' };
 async function announce(origin) {
   const pair = await (await fetch(origin + '/api/pairing')).json();
   const response = await fetch(origin + '/api/bridge/hello', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ version: '0.3.0' }) });
@@ -38,10 +38,10 @@ test('source matching tolerates SPA reroutes but flags real login pages', () => 
 });
 test('single progress page yields one record, not one per step', async () => {
   const input = { url: 'https://x.com/progress', company: '某公司', recordPage: true, title: '应聘进度', singlePage: true, cards: [{ text: '应聘进度 投递时间：2026-09-10 投递岗位：元宝-多模态对话系统研究 当前状态：简历投递成功 投递简历 测评 面试 Offer 三方协议', image: png, group: true }] };
-  const parsed = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '某公司', position: '元宝-多模态对话系统研究', applyTime: '2026-09-10', stage: '已投递', screening: '待反馈', evidence: '当前状态：简历投递成功' }] }));
+  const parsed = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '某公司', position: '元宝-多模态对话系统研究', applyTime: '2026-09-10', stage: '简历筛选中', screening: '待反馈', evidence: '当前状态：简历投递成功' }] }));
   assert.equal(parsed.rows.length, 1);
   assert.equal(parsed.rows[0].record.position, '元宝-多模态对话系统研究');
-  assert.equal(parsed.rows[0].record.stage, '已投递');
+  assert.equal(parsed.rows[0].record.stage, '简历筛选中');
 });
 test('loose JSON parser repairs fences, prose, trailing commas and truncation', () => {
   assert.deepEqual(parseLooseJson('```json\n{"applications":[]}\n```'), { applications: [] });
@@ -125,10 +125,10 @@ test('direction classifier covers image and other algorithm families', () => {
   assert.equal(classifyDirection('机器学习算法工程师'), '通用算法');
   assert.equal(classifyDirection('前端开发工程师'), '其他');
 });test('steps only use explicit current labels; no inferred rejection or interview round', () => {
-  assert.deepEqual(progressCandidate('岗位\n当前状态：二面中\n已投递\n一面中').candidate, { stage: '二面' });
-  assert.deepEqual(progressCandidate('岗位\n面试中').candidate, { stage: '面试中' });
+  assert.deepEqual(progressCandidate('岗位\n当前状态：二面中\n已投递\n一面中').candidate, { stage: '面试' });
+  assert.deepEqual(progressCandidate('岗位\n面试中').candidate, { stage: '面试' });
   assert.deepEqual(progressCandidate('岗位\n流程结束').candidate, { stage: '已结束' });
-  assert.deepEqual(progressCandidate('待笔试\n二面中').candidate, { stage: '二面' });
+  assert.deepEqual(progressCandidate('待笔试\n二面中').candidate, { stage: '面试' });
   assert.deepEqual(progressCandidate('简历未通过').candidate, { stage: '已结束', screening: '未通过' });
   assert.deepEqual(progressCandidate('算法工程师（图像算法）-广州-2027届秋招(J18074)\n当前进度：笔试-未处理\n校园招聘 2026-09-03 15:38 投递').candidate, { stage: '笔试' });
   assert.deepEqual(progressCandidate('算法工程师\n当前进度：测评已完成').candidate, { stage: '笔试' });
@@ -136,9 +136,8 @@ test('direction classifier covers image and other algorithm families', () => {
 test('validate dates, URLs and contradictory states', () => {
   for (const applyTime of ['2026-02-30', '2026-13-01', '2026/09/01']) assert.throws(() => normalize({ ...base, applyTime }));
   for (const url of ['javascript:alert(1)', 'https://user:pass@example.com', 'https://example.com/?token=x']) assert.throws(() => normalize({ ...base, url }));
-  assert.throws(() => normalize({ ...base, screening: '未通过' }));
+  assert.throws(() => normalize({ ...base, screening: '未通过', stage: '面试' }));
   assert.equal(normalize({ ...base, applyTime: '' }).applyTime, '');
-  assert.throws(() => normalize({ ...base, stage: '待投递' }));
   assert.equal(normalize({ ...base, stage: '已结束' }).screening, '待反馈');
 });
 test('status capture never equates end or action buttons with rejection', () => {
@@ -191,21 +190,25 @@ test('loopback API, durable revisions, confirmation, import and disabled AI', as
     assert.equal(preview.skipped, 1); assert.deepEqual(preview.errors, []);
     const invalid = 'company,position,applyTime,stage\n测试公司,多模态,2026-02-30,已投递';
     assert.equal((await request('/api/import', { csv: invalid, baseRevision: 2, confirmed: true })).status, 400);
-    assert.equal(readdirSync(dataDir).length, 2);
+    assert(readdirSync(dataDir).filter(n => /^revision-\d+\.json$/.test(n)).length >= 2);
     const formula = 'company,position,notes\n另一公司,多模态,=SUM(1)';
     assert.equal((await request('/api/import', { csv: formula, baseRevision: 2, confirmed: true })).status, 200);
     assert.match(await (await request('/api/export')).text(), /'=SUM\(1\)/);
     assert.equal((await request('/api/refresh/tasks')).status, 403);
     await announce(origin);
     const started = await (await request('/api/refresh/start', { baseRevision: 3 })).json();
-    assert.equal(started.batch.tasks.length, 1);
+    assert.equal(started.batch.tasks.length, 2);
+    // The imported row has no URL, so its task is marked failed up front; only the
+    // real record is queued for the browser.
+    const queued = started.batch.tasks.filter(t => t.status === 'queued');
+    assert.equal(queued.length, 1); assert.equal(queued[0].id, record.id);
+    assert.equal(started.batch.tasks.filter(t => t.status === 'failed').length, 1);
     const pair = await (await request('/api/pairing')).json();
     const extension = { headers: { Authorization: `Bearer ${pair.token}`, Origin: 'chrome-extension://test' } };
     assert.equal((await request('/api/refresh/result', { batchId: started.batch.id, id: record.id, url: base.url, text: '语音算法\n当前状态：二面中' }, extension)).status, 200);
-    assert.equal((await (await request('/api/state')).json()).records[0].stage, '已投递');
-    assert.equal((await request('/api/refresh/apply', { batchId: started.batch.id })).status, 400);
+    assert.equal((await (await request('/api/state')).json()).records[0].stage, '简历筛选中');
     const applied = await (await request('/api/refresh/apply', { batchId: started.batch.id, confirmed: true })).json();
-    assert.equal(applied.records[0].stage, '二面'); assert(applied.records[0].lastCheckedAt);
+    assert.equal(applied.records[0].stage, '面试'); assert(applied.records[0].lastCheckedAt);
     assert.equal((await request('/api/refresh/apply', { batchId: started.batch.id, confirmed: true })).status, 400);
   } finally { await new Promise(resolve => server.close(resolve)); }
   const restored = createServer({ dataDir }); restored.listen(0, '127.0.0.1'); await once(restored, 'listening');
@@ -220,23 +223,23 @@ test('AI image protocol, explicit consent, validation and no key in output', asy
   const mock = async (url, options) => {
     calls++; assert.equal(url, `${config.baseUrl}/chat/completions`); assert.equal(options.redirect, 'error');
     const body = JSON.parse(options.body); assert.equal(body.model, 'gpt-5.6-sol'); assert.equal(body.messages[1].content[1].type, 'image_url');
-    return fakeReply({ position: base.position, status: '当前进度：二面中', evidence: '当前进度：二面中', confidence: 'high' });
+    return fakeReply({ position: base.position, stage: '面试', screening: '待反馈', evidence: '当前进度：面试中' });
   };
   await assert.rejects(recognizeImage({ ...config, enabled: false }, base, png, mock)); assert.equal(calls, 0);
   await assert.rejects(analyze(config, { text: 'test', consent: false }, mock)); assert.equal(calls, 0);
-  const result = await recognizeImage(config, base, png, mock); assert.equal(result.candidate.stage, '二面');
-  const ended = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, status: '流程结束', evidence: '流程结束', confidence: 'high' }));
+  const result = await recognizeImage(config, base, png, mock); assert.equal(result.candidate.stage, '面试');
+  const ended = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, stage: '已结束', screening: '待反馈', evidence: '流程结束' }));
   assert.equal(ended.candidate.stage, '已结束');
   // Low confidence is still accepted when an explicit status was copied, since
   // the user confirms before anything is saved.
-  const lowButClear = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, status: '当前进度：二面', evidence: '二面', confidence: 'low' }));
-  assert.equal(lowButClear.candidate.stage, '二面');
+  const lowButClear = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, stage: '面试', evidence: '二面' }));
+  assert.equal(lowButClear.candidate.stage, '面试');
   await assert.rejects(recognizeImage(config, base, 'data:image/png;base64,dGVzdA==', mock));
 });
 
 test('screenshot recognition tolerates position suffixes and punctuation', async () => {
   const task = { company: '某公司', position: '语音算法工程师' };
-  const replyFor = position => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, status: '当前进度：笔试-未处理', evidence: '当前进度：笔试-未处理', confidence: 'high' }) } }] }), { status: 200 });
+  const replyFor = position => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, stage: '笔试', screening: '待反馈', evidence: '当前进度：笔试-未处理' }) } }] }), { status: 200 });
   // Exact, suffixed, and punctuated variants should all map to 笔试.
   for (const variant of ['语音算法工程师', '语音算法工程师(J12345)', '语音算法工程师（2027届）', '  语音算法 工程师 ']) {
     const result = await recognizeImage(config, task, png, async () => replyFor(variant));
@@ -255,7 +258,7 @@ test('model catalog drives the right API shape for Claude and Gemini', async () 
   let seen = null;
   await recognizeImage(claude, base, png, async (url, options) => {
     seen = { url, headers: options.headers, body: JSON.parse(options.body) };
-    return new Response(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ position: base.position, status: '当前进度：二面中', evidence: '二面中', confidence: 'high' }) }] }), { status: 200 });
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ position: base.position, stage: '面试', screening: '待反馈', evidence: '二面中' }) }] }), { status: 200 });
   });
   assert.equal(seen.url, `${claude.baseUrl}/messages`);
   assert.equal(seen.headers['x-api-key'], claude.apiKey);
@@ -268,14 +271,14 @@ test('model catalog drives the right API shape for Claude and Gemini', async () 
   await recognizeImage(gemini, base, png, async (url, options) => {
     assert.equal(url, `${gemini.baseUrl}/chat/completions`);
     assert.equal(options.headers.Authorization, `Bearer ${gemini.apiKey}`);
-    return fakeReply({ position: base.position, status: '当前进度：二面中', evidence: '二面中', confidence: 'high' });
+    return fakeReply({ position: base.position, stage: '面试', screening: '待反馈', evidence: '二面中' });
   });
 });
 
 test('batch refresh all submitted records, AI fallback only on rule failure, preserve failures', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'batch-')); let calls = 0;
-  const server = createServer({ dataDir, aiConfig: config, fetchAI: async () => { calls++; return fakeReply({ position: '多模态算法', status: '当前进度：二面中', evidence: '二面中', confidence: 'high' }); } });
+  const server = createServer({ dataDir, aiConfig: config, fetchAI: async () => { calls++; return fakeReply({ position: '多模态算法', stage: '面试', screening: '待反馈', evidence: '二面中' }); } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   const req = async (path, body, token) => {
@@ -295,9 +298,9 @@ test('batch refresh all submitted records, AI fallback only on rule failure, pre
     // Second record: rules can't read it, so the server checks the TEXT with AI
     // in the same request (no screenshot needed). The mock AI returns 二面.
     await result(state.records[1].id, '多模态算法\n下一轮已安排'); assert.equal(calls, 1);
-    assert.equal((await req('/api/state')).data.records[1].stage, '已投递');
+    assert.equal((await req('/api/state')).data.records[1].stage, '简历筛选中');
     state = (await req('/api/refresh/apply', { batchId: batch.id, confirmed: true })).data;
-    assert.equal(state.records[0].screening, '通过'); assert.equal(state.records[1].stage, '二面'); assert.equal(state.records[1].screening, '待反馈');
+    assert.equal(state.records[0].screening, '通过'); assert.equal(state.records[1].stage, '面试'); assert.equal(state.records[1].screening, '待反馈');
     assert.equal(state.records[2].lastCheckedAt, ''); assert.equal(state.records[2].history.length, 1);
     const stale = (await req('/api/refresh/start', { baseRevision: 4 })).data.batch;
     await req('/api/records', { record: { ...state.records[0], notes: '新的手动备注' }, baseRevision: 4, confirmed: true });
@@ -355,7 +358,7 @@ test('calendar persists several rounds independently and preserves them across r
     state = (await request('/api/events', { event: { recordId: record.id, title: '算法二面', date: '2026-09-15', allDay: true, kind: '面试' }, baseRevision: 4 })).data;
     assert.equal(state.events.length, 3); assert.equal(new Set(state.events.map(e => e.id)).size, 3);
     const events = structuredClone(state.events);
-    state = (await request('/api/records', { record: { ...record, stage: '一面' }, baseRevision: 5, confirmed: true })).data;
+    state = (await request('/api/records', { record: { ...record, stage: '面试' }, baseRevision: 5, confirmed: true })).data;
     assert.deepEqual(state.events, events);
     assert.equal((await request('/api/events', { event: { ...first, date: '2026-09-20' }, baseRevision: 5, confirmed: true })).status, 409);
     state = (await request('/api/import', { csv: 'company,position\n另一公司,多模态', baseRevision: 6, confirmed: true })).data;
@@ -365,7 +368,7 @@ test('calendar persists several rounds independently and preserves them across r
     const pair = (await request('/api/pairing')).data;
     await fetch(origin + '/api/refresh/result', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ batchId: batch.id, id: record.id, url: record.url, text: '语音算法\n当前状态：二面中' }) });
     state = (await request('/api/refresh/apply', { batchId: batch.id, confirmed: true })).data;
-    assert.deepEqual(state.events, events); assert.equal(state.records[0].stage, '二面');
+    assert.deepEqual(state.events, events); assert.equal(state.records[0].stage, '面试');
     assert.equal((await fetch(origin + '/api/events', { method: 'DELETE' })).status, 405);
   } finally { await new Promise(resolve => server.close(resolve)); }
   server = createServer({ dataDir }); server.listen(0, '127.0.0.1'); await once(server, 'listening'); origin = `http://127.0.0.1:${server.address().port}`;
@@ -395,8 +398,8 @@ test('stable fingerprint is insensitive to timestamps but sensitive to job count
 
 test('whole-page AI extracts multiple positions without inventing dates or rejection', async () => {
   const applications = [
-    { index: 0, applied: true, confidence: 'high', company: '测试企业', position: '语音算法', applyTime: '', stage: '已投递', screening: '待反馈', evidence: '语音算法 已投递' },
-    { index: 0, applied: true, confidence: 'high', company: '测试企业', position: '多模态算法', applyTime: '', stage: '面试中', screening: '待反馈', evidence: '多模态算法 面试中' }
+    { index: 0, applied: true, confidence: 'high', company: '测试企业', position: '语音算法', applyTime: '', stage: '简历筛选中', screening: '待反馈', evidence: '语音算法 已投递' },
+    { index: 0, applied: true, confidence: 'high', company: '测试企业', position: '多模态算法', applyTime: '', stage: '面试', screening: '待反馈', evidence: '多模态算法 面试中' }
   ];
   const input = { url: 'https://app.mokahr.com/campus-recruitment/test/#/applications', company: '', cards: [{ text: '我的投递', image: png, group: true }] };
   const result = await extractApplications(config, input, async (_, options) => { const body = JSON.parse(options.body); assert.equal(body.messages[1].content.at(-1).type, 'image_url'); return fakeReply({ applications }); });
@@ -411,7 +414,7 @@ test('record page trusts listed items but rejects invented dates and rejection',
   const input = { url: 'https://iwhalecloud1.zhiye.com/personal/deliveryRecord', company: '', recordPage: true, title: '投递记录', cards: [{ text: '投递记录', image: png, group: true }] };
   const good = await extractApplications(config, input, async () => fakeReply({ applications: [
     { index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-09-03', stage: '笔试', screening: '待反馈', evidence: '当前进度：笔试-未处理' },
-    { index: 0, applied: true, confidence: 'high', company: '', position: '多模态算法工程师', applyTime: '', stage: '面试中', screening: '通过', evidence: '当前进度：面试中；简历筛选通过' }
+    { index: 0, applied: true, confidence: 'high', company: '', position: '多模态算法工程师', applyTime: '', stage: '面试', screening: '通过', evidence: '当前进度：面试中；简历筛选通过' }
   ] }));
   assert.equal(good.rows.length, 2); assert.deepEqual(good.warnings, []);
   assert.equal(good.rows[0].record.stage, '笔试'); assert.equal(good.rows[0].record.screening, '待反馈');
@@ -419,7 +422,7 @@ test('record page trusts listed items but rejects invented dates and rejection',
   const bad = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-09-03', stage: '已结束', screening: '未通过', evidence: '流程结束' }] }));
   assert.equal(bad.rows.length, 0); assert(bad.warnings.length >= 1);
   // Invalid calendar date must be dropped, not saved as-is.
-  const badDate = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-02-30', stage: '已投递', screening: '待反馈', evidence: '投递 2026-02-30' }] }));
+  const badDate = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-02-30', stage: '简历筛选中', screening: '待反馈', evidence: '投递 2026-02-30' }] }));
   assert.equal(badDate.rows.length, 1); assert.equal(badDate.rows[0].record.applyTime, ''); assert(badDate.warnings.some(w => /日期/.test(w)));
 });
 
@@ -428,7 +431,7 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
   const dataDir = mkdtempSync(join(testRoot, 'pages-')); let calls = 0;
   const source = 'https://app.mokahr.com/campus-recruitment/test/#/applications';
   const responseRows = [
-    { index: 0, applied: true, confidence: 'high', company: base.company, position: '语音算法', applyTime: '2026-09-01', status: '当前进度：二面中', evidence: '语音算法 二面中' },
+    { index: 0, applied: true, confidence: 'high', company: base.company, position: '语音算法', applyTime: '2026-09-01', status: '当前进度：面试中', evidence: '语音算法 二面中' },
     { index: 0, applied: true, confidence: 'high', company: base.company, position: '多模态算法', applyTime: '', status: '当前进度：已投递', evidence: '多模态算法 已投递' }
   ];
   const server = createServer({ dataDir, aiConfig: { ...config }, fetchAI: async () => { calls++; return fakeReply({ applications: responseRows }); } }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
@@ -447,7 +450,7 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
     const preview = (await req('/api/pages')).data.job; assert.equal(preview.status, 'ready'); assert.equal(preview.rows.length, 2); assert.equal(preview.rows[0].action, 'update'); assert.equal(preview.rows[1].action, 'add');
     assert.equal((await req('/api/state')).data.records.length, 1);
     state = (await req('/api/pages/apply', { id: job.id, rows: preview.rows.map(row => ({ index: row.index, ...row.record })), confirmed: true })).data;
-    assert.equal(state.records.length, 2); assert.equal(state.records[0].stage, '二面'); assert.equal(state.records[0].notes, '保留手动备注'); assert.equal(state.records[0].nextAction, '联系HR');
+    assert.equal(state.records.length, 2); assert.equal(state.records[0].stage, '面试'); assert.equal(state.records[0].notes, '保留手动备注'); assert.equal(state.records[0].nextAction, '联系HR');
     // A freshly imported row counts as checked, so it is not left as 未核对.
     assert(state.records.every(r => typeof r.lastCheckedAt === 'string' && r.lastCheckedAt.length > 0));
     // After saving, a reset clears the finished job so the dialog does not
@@ -461,7 +464,7 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
 test('browser acceptance keeps AI disabled until guard checks and image test pass', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'acceptance-')); const settings = { ...config, enabled: false }; let calls = 0;
-  const server = createServer({ dataDir, aiConfig: settings, fetchAI: async () => { calls++; return fakeReply({ position: '浏览器自检岗位', status: '当前状态：二面中', evidence: '当前状态：二面中', confidence: 'high' }); } });
+  const server = createServer({ dataDir, aiConfig: settings, fetchAI: async () => { calls++; return fakeReply({ position: '浏览器自检岗位', stage: '面试', screening: '待反馈', evidence: '当前状态：二面中' }); } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); const origin = `http://127.0.0.1:${server.address().port}`;
   const req = async (path, body, token) => { const response = await fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json() }; };
   try {
