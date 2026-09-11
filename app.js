@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.13';
+const UI_VERSION = '2026-09-10.16';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -18,25 +18,28 @@ const calendarUI = setupCalendar({ getState: () => state, notify: toast, save: a
 for (const [id, values] of [['directionFilter', DIRECTIONS], ['stageFilter', STAGES], ['screenFilter', SCREENINGS], ['formDirection', DIRECTIONS], ['formStage', STAGES], ['formScreening', SCREENINGS], ['formRank', RANKS]]) options(id, values);
 $('formRank').insertAdjacentHTML('afterbegin', '<option value="">未标注</option>');
 $('seasonYear').textContent = new Date().getFullYear();
+$('sortDir').dataset.dir = 'desc';
 $('today').textContent = new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric', weekday: 'long' });
 const STAGE_ORDER = { '待投递': 0, '已投递': 1, '笔试': 2, '面试中': 3, '一面': 4, '二面': 5, '终面': 6, 'Offer': 7, '已结束': 8, '已撤回': 9 };
 const SCREEN_ORDER = { '未投递': 0, '待反馈': 1, '通过': 2, '未通过': 3 };
+// Group headings shown above the list, in a fixed, easy-to-scan order.
+const STAGE_GROUPS = ['面试中', '一面', '二面', '终面', 'Offer', '笔试', '已投递', '待投递', '已结束', '已撤回'];
+const sortDir = () => ($('sortDir').dataset.dir === 'asc' ? 1 : -1);
 function sortRecords(records) {
-  const mode = $('sortOrder').value;
-  const rank = r => { const m = /^第(\d+)志愿$/.exec(r.rank || ''); return r.rank === '人才计划' ? 0 : m ? Number(m[1]) : 99; };
+  const field = $('sortOrder').value;
+  const dir = sortDir();
+  const rank = r => rankValue(r.rank);
   const byRank = (a, b) => rank(a) - rank(b) || a.company.localeCompare(b.company, 'zh-CN');
   const comparators = {
-    updated: (a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''),
-    applied: (a, b) => (b.applyTime || '').localeCompare(a.applyTime || '') || byRank(a, b),
-    'applied-asc': (a, b) => (a.applyTime || '9').localeCompare(b.applyTime || '9') || byRank(a, b),
-    company: (a, b) => a.company.localeCompare(b.company, 'zh-CN') || byRank(a, b),
-    stage: (a, b) => (STAGE_ORDER[a.stage] ?? 9) - (STAGE_ORDER[b.stage] ?? 9) || byRank(a, b),
-    screening: (a, b) => (SCREEN_ORDER[a.screening] ?? 9) - (SCREEN_ORDER[b.screening] ?? 9) || byRank(a, b),
-    // Never-checked records sort first (empty string), so "what haven't I looked at" is on top.
-    checked: (a, b) => (a.lastCheckedAt || '').localeCompare(b.lastCheckedAt || '') || byRank(a, b),
-    'checked-desc': (a, b) => (b.lastCheckedAt || '').localeCompare(a.lastCheckedAt || '') || byRank(a, b)
+    updated: (a, b) => (a.updatedAt || '').localeCompare(b.updatedAt || ''),
+    applied: (a, b) => (a.applyTime || '').localeCompare(b.applyTime || ''),
+    company: (a, b) => a.company.localeCompare(b.company, 'zh-CN'),
+    stage: (a, b) => (STAGE_ORDER[a.stage] ?? 9) - (STAGE_ORDER[b.stage] ?? 9),
+    // Empty check time sorts first when ascending ("never checked" on top).
+    checked: (a, b) => (a.lastCheckedAt || '').localeCompare(b.lastCheckedAt || '')
   };
-  return [...records].sort(comparators[mode] || comparators.updated);
+  const base = comparators[field] || comparators.stage;
+  return [...records].sort((a, b) => dir * base(a, b) || byRank(a, b));
 }
 function filtered() {
   const query = $('search').value.toLowerCase().trim();
@@ -79,32 +82,25 @@ function statusCell(r) {
 }
 function rankLabel(rank) { return rank ? `<span class="rank-tag">${esc(rank)}</span>` : ''; }
 function rankValue(rank) { const m = /^第(\d+)志愿$/.exec(rank || ''); return rank === '人才计划' ? 0 : m ? Number(m[1]) : 99; }
-function grouped(records) {
+function companyGroups(records) {
   const map = new Map();
   for (const r of records) { if (!map.has(r.company)) map.set(r.company, []); map.get(r.company).push(r); }
   // Order preferences inside each company: rank number, then date.
   for (const items of map.values()) items.sort((a, b) => rankValue(a.rank) - rankValue(b.rank) || (a.applyTime || '').localeCompare(b.applyTime || ''));
-  // Order the company groups to match the chosen sort instead of insertion order.
-  const mode = $('sortOrder').value;
-  const first = items => items[0];
   const groups = [...map.entries()];
-  groups.sort(([, a], [, b]) => {
-    if (mode === 'company') return first(a).company.localeCompare(first(b).company, 'zh-CN');
-    if (mode === 'applied') return (b.reduce((m, r) => r.applyTime > m ? r.applyTime : m, '')).localeCompare(a.reduce((m, r) => r.applyTime > m ? r.applyTime : m, ''));
-    if (mode === 'applied-asc') return (a.reduce((m, r) => (r.applyTime && r.applyTime < m) ? r.applyTime : m, '9')).localeCompare(b.reduce((m, r) => (r.applyTime && r.applyTime < m) ? r.applyTime : m, '9'));
-    if (mode === 'stage') return (STAGE_ORDER[first(a).stage] ?? 9) - (STAGE_ORDER[first(b).stage] ?? 9);
-    if (mode === 'screening') return (SCREEN_ORDER[first(a).screening] ?? 9) - (SCREEN_ORDER[first(b).screening] ?? 9);
-    // earliest check time in the group decides the order; unchecked (empty) first
-    if (mode === 'checked') return (a.reduce((m, r) => (r.lastCheckedAt || '') < m ? (r.lastCheckedAt || '') : m, '\uffff')).localeCompare(b.reduce((m, r) => (r.lastCheckedAt || '') < m ? (r.lastCheckedAt || '') : m, '\uffff'));
-    if (mode === 'checked-desc') return (b.reduce((m, r) => (r.lastCheckedAt || '') > m ? r.lastCheckedAt : m, '')).localeCompare(a.reduce((m, r) => (r.lastCheckedAt || '') > m ? r.lastCheckedAt : m, ''));
-    return (b.reduce((m, r) => (r.updatedAt || '') > m ? r.updatedAt : m, '')).localeCompare(a.reduce((m, r) => (r.updatedAt || '') > m ? r.updatedAt : m, ''));
-  });
+  groups.sort(([, a], [, b]) => a[0].company.localeCompare(b[0].company, 'zh-CN'));
   return groups;
 }
-function render() {
-  const records = filtered();
-  $('navCount').textContent = state.records.length; $('filteredCount').textContent = records.length; $('tableCount').textContent = `${records.length} 条记录 · ${grouped(records).length} 家公司`;   $('saveState').textContent = `本地已保存 · 版本 ${state.revision} · 界面 ${UI_VERSION}`;
-  $('recordRows').innerHTML = grouped(records).map(([company, items]) => `
+// Split the filtered list into stage sections (面试中 / 一面 / 笔试 ...) in a fixed
+// order, so interview and test items are easy to spot without opening filters.
+function stageSections(records) {
+  const byStage = new Map();
+  for (const r of records) { if (!byStage.has(r.stage)) byStage.set(r.stage, []); byStage.get(r.stage).push(r); }
+  const ordered = [...STAGE_GROUPS, ...[...byStage.keys()].filter(s => !STAGE_GROUPS.includes(s))];
+  return ordered.filter(stage => byStage.has(stage)).map(stage => [stage, byStage.get(stage)]);
+}
+function recordCard(company, items) {
+  return `
     <article class="company-card">
       <header class="company-card-head">
         <span class="company-initial">${esc(company.slice(0, 1))}</span>
@@ -133,7 +129,17 @@ function render() {
           </div>
         </li>`; }).join('')}
       </ul>
-    </article>`).join('');  $('emptyState').hidden = records.length > 0; $('emptyTitle').textContent = state.records.length ? '没有匹配的记录' : '还没有投递记录'; $('emptyAdd').hidden = state.records.length > 0;
+    </article>`;
+}
+function render() {
+  const records = filtered();
+  $('navCount').textContent = state.records.length; $('filteredCount').textContent = records.length; $('tableCount').textContent = `${records.length} 条记录 · ${state.records.length ? new Set(records.map(r => r.company)).size : 0} 家公司`;   $('saveState').textContent = `本地已保存 · 版本 ${state.revision} · 界面 ${UI_VERSION}`;
+  $('recordRows').innerHTML = stageSections(records).map(([stage, items]) => `
+    <section class="stage-section">
+      <h3 class="stage-title">${esc(stage)}<span class="stage-count">${items.length}</span></h3>
+      ${companyGroups(items).map(([company, group]) => recordCard(company, group)).join('')}
+    </section>`).join('');
+  $('emptyState').hidden = records.length > 0; $('emptyTitle').textContent = state.records.length ? '没有匹配的记录' : '还没有投递记录'; $('emptyAdd').hidden = state.records.length > 0;
   const due = scheduledEvents(state.records, state.events).filter(event => event.status === '待进行');
   $('scheduleCount').textContent = `${due.length} 项安排`;
   $('scheduleList').innerHTML = due.length ? due.map(event => {
@@ -157,6 +163,12 @@ function setView(next) {
 }
 document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { setView(button.dataset.view); history.replaceState(null, '', button.dataset.view === 'all' ? location.pathname : `#${button.dataset.view}`); });
 for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter', 'sortOrder']) $(id).addEventListener('input', render);
+$('sortDir').onclick = () => {
+  const next = $('sortDir').dataset.dir === 'asc' ? 'desc' : 'asc';
+  $('sortDir').dataset.dir = next;
+  $('sortDirLabel').textContent = next === 'asc' ? '升序' : '降序';
+  render();
+};
 $('resetFilters').onclick = () => { for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter']) $(id).value = ''; render(); };
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).close());
 document.addEventListener('click', event => { const button = event.target.closest('[data-edit]'); if (button) openRecord(button.dataset.edit); const check = event.target.closest('[data-check]'); if (check) checkOne(check.dataset.check); const appointment = event.target.closest('[data-event]'); if (appointment) calendarUI.openEvent(appointment.dataset.event); const remove = event.target.closest('[data-delete]'); if (remove) deleteRecord(remove.dataset.delete); });
@@ -208,9 +220,10 @@ function renderBatch() {
   $('batchRows').innerHTML = tasks.map(t => `<tr><td><strong>${esc(t.company)}</strong><span class="cell-secondary">${esc(t.position)}</span></td><td>${esc(t.before.stage)}<span class="cell-secondary">简历${esc(t.before.screening)}</span></td><td>${t.candidate ? `${badge(t.candidate.stage, true)}<span class="cell-secondary">简历${esc(t.candidate.screening)} · ${esc(t.method)}</span><span class="cell-secondary">${esc(t.evidence)}</span>` : '--'}</td><td><span class="badge ${t.status === 'failed' ? 'fail' : t.status === 'changed' ? 'pass' : ['queued', 'needs-image', 'ai-running'].includes(t.status) ? 'pending' : ''}">${{ queued: '等待采集', 'needs-image': '等待截图', 'ai-running': 'AI 核对中', changed: '有变化', unchanged: '无变化', failed: '保留原记录' }[t.status]}</span><span class="cell-secondary">${esc(t.message)}</span></td></tr>`).join('');
   $('batchApply').disabled = !good || !!pending || !!batch?.applied; $('batchCancel').disabled = !pending; $('batchStart').disabled = pending > 0;
 }
-async function refreshBatch() { try { ({ batch } = await api('/api/refresh')); renderBatch(); $('syncError').textContent = ''; const pending = (batch?.tasks || []).some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status)); if (batch && pending !== batchRunning) { batchRunning = pending; if (!pending) { state = await api('/api/state'); render(); } } } catch (error) { $('syncError').textContent = `进度暂时读取失败，会自动重试：${error.message}`; } }
+async function refreshBatch() { try { ({ batch } = await api('/api/refresh')); renderBatch(); const pending = (batch?.tasks || []).some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status)); if (batch && pending !== batchRunning) { batchRunning = pending; if (!pending) { state = await api('/api/state'); render(); } } } catch (error) { $('syncError').textContent = error.message; } }
 $('syncOpen').onclick = () => { $('syncError').textContent = ''; $('batchAIState').textContent = state.aiEnabled ? `${state.aiModel} · 规则不确定时自动使用 800px 整页截图` : '自动 AI 兜底尚未启用，请先在连接设置中完成浏览器自检'; $('syncDialog').showModal(); refreshBatch(); clearInterval(polling); polling = setInterval(() => { if (!document.hidden) refreshBatch(); }, 3000); };
 $('syncDialog').addEventListener('close', () => { clearInterval(polling); polling = null; });
+$('batchRefresh').onclick = refreshBatch;
 $('batchStart').onclick = async () => {
   $('syncError').textContent = ''; $('batchStart').disabled = true; $('batchHint').textContent = '正在连接浏览器…'; let started = false;
   try { const connection = await browserBridge('PING'); if (connection.busy) throw new Error('已有浏览器任务执行中，请稍后再试'); ({ batch } = await api('/api/refresh/start', { baseRevision: state.revision })); started = true; await browserBridge('RUN'); renderBatch(); toast('浏览器已开始核对全部记录'); }

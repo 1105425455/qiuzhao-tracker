@@ -5,7 +5,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
-import { normalize, screeningCandidate, progressCandidate, classifyDirection } from './model.mjs';
+import { normalize, screeningCandidate, progressCandidate, classifyDirection, scopeToPosition } from './model.mjs';
 import { createServer, importPreview, samePage, looksLikeLogin } from './server.mjs';
 import { recognizeImage, analyze, extractApplications, parseLooseJson } from './ai.mjs';
 import { apiForModel, MODEL_CATALOG } from './models.mjs';
@@ -101,6 +101,20 @@ test('rank regex tolerates spaces, full-width and Chinese digits', () => {
   for (const sample of ['第1志愿', '第 1 志愿', '第2志愿', '第 2 志愿', '第１志愿', '第一志愿']) assert(rankRe.test(sample), sample);
   assert(!rankRe.test('志愿填报说明'));
 });
+test('scopeToPosition narrows a page to the right job and reports misses', () => {
+  const task = { company: '科大讯飞', position: 'AI研究算法工程师-智能语音方向' };
+  const page = [
+    '投递记录', '已完成的投递', '语音算法工程师(J100)', '当前进度：简历筛选中',
+    'AI研究算法工程师-智能语音方向(J13389)', '当前进度：笔试-未处理', '2026-09-08 投递',
+    '多模态大模型算法工程师', '当前进度：面试中'
+  ].join('\n');
+  const scoped = scopeToPosition(page, task);
+  assert.equal(scoped.found, true);
+  assert(scoped.text.includes('笔试-未处理'));
+  assert(!scoped.text.includes('面试中'));
+  const missing = scopeToPosition('完全不相关的页面内容 没有任何岗位', task);
+  assert.equal(missing.found, false);
+});
 test('direction classifier covers image and other algorithm families', () => {
   assert.equal(classifyDirection('算法工程师（图像算法）-广州-2027届秋招(J18074)'), '图像算法');
   assert.equal(classifyDirection('计算机视觉算法工程师'), '图像算法');
@@ -114,7 +128,7 @@ test('direction classifier covers image and other algorithm families', () => {
   assert.deepEqual(progressCandidate('岗位\n当前状态：二面中\n已投递\n一面中').candidate, { stage: '二面' });
   assert.deepEqual(progressCandidate('岗位\n面试中').candidate, { stage: '面试中' });
   assert.deepEqual(progressCandidate('岗位\n流程结束').candidate, { stage: '已结束' });
-  assert.equal(progressCandidate('待笔试\n二面中').ambiguous, true);
+  assert.deepEqual(progressCandidate('待笔试\n二面中').candidate, { stage: '二面' });
   assert.deepEqual(progressCandidate('简历未通过').candidate, { stage: '已结束', screening: '未通过' });
   assert.deepEqual(progressCandidate('算法工程师（图像算法）-广州-2027届秋招(J18074)\n当前进度：笔试-未处理\n校园招聘 2026-09-03 15:38 投递').candidate, { stage: '笔试' });
   assert.deepEqual(progressCandidate('算法工程师\n当前进度：测评已完成').candidate, { stage: '笔试' });
@@ -206,29 +220,30 @@ test('AI image protocol, explicit consent, validation and no key in output', asy
   const mock = async (url, options) => {
     calls++; assert.equal(url, `${config.baseUrl}/chat/completions`); assert.equal(options.redirect, 'error');
     const body = JSON.parse(options.body); assert.equal(body.model, 'gpt-5.6-sol'); assert.equal(body.messages[1].content[1].type, 'image_url');
-    return fakeReply({ position: base.position, stage: '二面', screening: null, evidence: '二面已安排', confidence: 'high' });
+    return fakeReply({ position: base.position, status: '当前进度：二面中', evidence: '当前进度：二面中', confidence: 'high' });
   };
   await assert.rejects(recognizeImage({ ...config, enabled: false }, base, png, mock)); assert.equal(calls, 0);
   await assert.rejects(analyze(config, { text: 'test', consent: false }, mock)); assert.equal(calls, 0);
   const result = await recognizeImage(config, base, png, mock); assert.equal(result.candidate.stage, '二面');
-  await assert.rejects(recognizeImage(config, base, png, async () => fakeReply({ position: base.position, stage: '已结束', screening: '未通过', evidence: '流程结束', confidence: 'high' })));
-  await assert.rejects(recognizeImage(config, base, png, async () => fakeReply({ position: '其他岗位', stage: 'Offer', evidence: '录用', confidence: 'high' })));
-  await assert.rejects(recognizeImage(config, base, png, async () => fakeReply({ position: base.position, stage: '二面', evidence: '二面', confidence: 'low' })));
+  const ended = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, status: '流程结束', evidence: '流程结束', confidence: 'high' }));
+  assert.equal(ended.candidate.stage, '已结束');
+  // Low confidence is still accepted when an explicit status was copied, since
+  // the user confirms before anything is saved.
+  const lowButClear = await recognizeImage(config, base, png, async () => fakeReply({ position: base.position, status: '当前进度：二面', evidence: '二面', confidence: 'low' }));
+  assert.equal(lowButClear.candidate.stage, '二面');
   await assert.rejects(recognizeImage(config, base, 'data:image/png;base64,dGVzdA==', mock));
 });
 
 test('screenshot recognition tolerates position suffixes and punctuation', async () => {
   const task = { company: '某公司', position: '语音算法工程师' };
-  const replyFor = position => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, stage: '笔试', screening: null, evidence: '当前进度：笔试-未处理', confidence: 'high' }) } }] }), { status: 200 });
-  // Exact, suffixed, and punctuated variants should all match.
+  const replyFor = position => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, status: '当前进度：笔试-未处理', evidence: '当前进度：笔试-未处理', confidence: 'high' }) } }] }), { status: 200 });
+  // Exact, suffixed, and punctuated variants should all map to 笔试.
   for (const variant of ['语音算法工程师', '语音算法工程师(J12345)', '语音算法工程师（2027届）', '  语音算法 工程师 ']) {
     const result = await recognizeImage(config, task, png, async () => replyFor(variant));
     assert.equal(result.candidate.stage, '笔试', variant);
   }
-  // A genuinely different position is still rejected.
-  await assert.rejects(recognizeImage(config, task, png, async () => replyFor('多模态算法工程师')));
-  // Low confidence is still rejected.
-  await assert.rejects(recognizeImage(config, task, png, async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position: '语音算法工程师', stage: '笔试', screening: null, evidence: '笔试', confidence: 'low' }) } }] }), { status: 200 })));
+  // A totally unreadable reply is rejected.
+  await assert.rejects(recognizeImage(config, task, png, async () => fakeReply({ position: task.position, status: '看不清', evidence: '看不清', confidence: 'high' })));
 });
 test('model catalog drives the right API shape for Claude and Gemini', async () => {
   assert.equal(apiForModel('claude-opus-5'), 'anthropic');
@@ -240,7 +255,7 @@ test('model catalog drives the right API shape for Claude and Gemini', async () 
   let seen = null;
   await recognizeImage(claude, base, png, async (url, options) => {
     seen = { url, headers: options.headers, body: JSON.parse(options.body) };
-    return new Response(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ position: base.position, stage: '二面', screening: null, evidence: '二面已安排', confidence: 'high' }) }] }), { status: 200 });
+    return new Response(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ position: base.position, status: '当前进度：二面中', evidence: '二面中', confidence: 'high' }) }] }), { status: 200 });
   });
   assert.equal(seen.url, `${claude.baseUrl}/messages`);
   assert.equal(seen.headers['x-api-key'], claude.apiKey);
@@ -253,14 +268,14 @@ test('model catalog drives the right API shape for Claude and Gemini', async () 
   await recognizeImage(gemini, base, png, async (url, options) => {
     assert.equal(url, `${gemini.baseUrl}/chat/completions`);
     assert.equal(options.headers.Authorization, `Bearer ${gemini.apiKey}`);
-    return fakeReply({ position: base.position, stage: '二面', screening: null, evidence: '二面已安排', confidence: 'high' });
+    return fakeReply({ position: base.position, status: '当前进度：二面中', evidence: '二面中', confidence: 'high' });
   });
 });
 
 test('batch refresh all submitted records, AI fallback only on rule failure, preserve failures', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'batch-')); let calls = 0;
-  const server = createServer({ dataDir, aiConfig: config, fetchAI: async () => { calls++; return fakeReply({ position: '多模态算法', stage: '二面', screening: null, evidence: '二面已安排', confidence: 'high' }); } });
+  const server = createServer({ dataDir, aiConfig: config, fetchAI: async () => { calls++; return fakeReply({ position: '多模态算法', status: '当前进度：二面中', evidence: '二面中', confidence: 'high' }); } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   const req = async (path, body, token) => {
@@ -277,9 +292,9 @@ test('batch refresh all submitted records, AI fallback only on rule failure, pre
     assert.equal((await req('/api/refresh/start', { baseRevision: 3 })).status, 400);
     const result = (id, text) => req('/api/refresh/result', { batchId: batch.id, id, text, url: base.url }, token);
     await result(state.records[0].id, '语音算法\n简历筛选通过'); assert.equal(calls, 0);
-    assert.equal((await result(state.records[1].id, '多模态算法\n下一轮已安排')).data.needsAI, true);
-    assert.equal((await req('/api/refresh/apply', { batchId: batch.id, confirmed: true })).status, 400);
-    assert.equal((await req('/api/refresh/image', { batchId: batch.id, id: state.records[1].id, url: base.url, image: png }, token)).status, 200); assert.equal(calls, 1);
+    // Second record: rules can't read it, so the server checks the TEXT with AI
+    // in the same request (no screenshot needed). The mock AI returns 二面.
+    await result(state.records[1].id, '多模态算法\n下一轮已安排'); assert.equal(calls, 1);
     assert.equal((await req('/api/state')).data.records[1].stage, '已投递');
     state = (await req('/api/refresh/apply', { batchId: batch.id, confirmed: true })).data;
     assert.equal(state.records[0].screening, '通过'); assert.equal(state.records[1].stage, '二面'); assert.equal(state.records[1].screening, '待反馈');
@@ -413,8 +428,8 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
   const dataDir = mkdtempSync(join(testRoot, 'pages-')); let calls = 0;
   const source = 'https://app.mokahr.com/campus-recruitment/test/#/applications';
   const responseRows = [
-    { index: 0, applied: true, confidence: 'high', company: base.company, position: '语音算法', applyTime: '2026-09-01', stage: '二面', screening: '待反馈', evidence: '语音算法 二面中' },
-    { index: 0, applied: true, confidence: 'high', company: base.company, position: '多模态算法', applyTime: '', stage: '已投递', screening: '待反馈', evidence: '多模态算法 已投递' }
+    { index: 0, applied: true, confidence: 'high', company: base.company, position: '语音算法', applyTime: '2026-09-01', status: '当前进度：二面中', evidence: '语音算法 二面中' },
+    { index: 0, applied: true, confidence: 'high', company: base.company, position: '多模态算法', applyTime: '', status: '当前进度：已投递', evidence: '多模态算法 已投递' }
   ];
   const server = createServer({ dataDir, aiConfig: { ...config }, fetchAI: async () => { calls++; return fakeReply({ applications: responseRows }); } }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
@@ -446,7 +461,7 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
 test('browser acceptance keeps AI disabled until guard checks and image test pass', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'acceptance-')); const settings = { ...config, enabled: false }; let calls = 0;
-  const server = createServer({ dataDir, aiConfig: settings, fetchAI: async () => { calls++; return fakeReply({ position: '浏览器自检岗位', stage: '二面', screening: null, evidence: '当前状态：二面中', confidence: 'high' }); } });
+  const server = createServer({ dataDir, aiConfig: settings, fetchAI: async () => { calls++; return fakeReply({ position: '浏览器自检岗位', status: '当前状态：二面中', evidence: '当前状态：二面中', confidence: 'high' }); } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); const origin = `http://127.0.0.1:${server.address().port}`;
   const req = async (path, body, token) => { const response = await fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json() }; };
   try {

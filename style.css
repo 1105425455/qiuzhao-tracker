@@ -4,6 +4,13 @@
 +.rank-tag{display:inline-block;background:#eaf1fb;color:#4a6fa5;border-radius:4px;font-size:11px;padding:2px 7px;margin-right:8px;flex-shrink:0}.company-count{font-size:11px;color:#94a096;font-weight:400;margin-left:9px}.records-table tr.group-start td{border-top:2px solid #dfe7e1}.records-table tr.group-row td{border-top:1px dashed #eef2ef}.records-table td:first-child .position-name{padding-left:36px}.icon-button.danger:hover{background:#fdecea;color:#b9574f}.page-preview .rank-tag{margin-right:0}
 /* Card list */
 .record-list{display:flex;flex-direction:column;gap:14px;padding-top:4px}
+.stage-section{display:flex;flex-direction:column;gap:12px;margin-bottom:26px}
+.stage-title{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:650;color:#2c4738;padding:6px 2px 2px;border-bottom:2px solid #e2ebe5}
+.stage-title .stage-count{background:#e7f0ea;color:#2f7256;border-radius:11px;font-size:12px;font-weight:600;padding:1px 9px;min-width:22px;text-align:center}
+.sort-field{display:inline-flex;align-items:center;gap:6px;font-size:12px;color:#7c8a80}
+.sort-field select{font-size:12px;padding:6px 8px;border-color:#d7dfdb}
+#sortDir{display:inline-flex;align-items:center;gap:5px;width:auto;padding:6px 10px;border:1px solid #d9e0dc;font-size:12px;color:#5f6f64;border-radius:5px}
+#sortDir span{font-size:12px}
 .list-head{display:grid;grid-template-columns:minmax(0,1fr) 120px 108px 88px 76px;gap:18px;padding:10px 18px 6px;font-size:11px;color:#8b9890;font-weight:500}
 .list-head span:nth-child(2),.list-head span:nth-child(3){text-align:left}.list-head span:nth-child(4){text-align:right}
 .company-card{border:1px solid var(--border);border-radius:10px;background:#fff;overflow:hidden;transition:border-color .15s,box-shadow .15s}

@@ -4,7 +4,11 @@ export async function scanApplications() {
   const url = location.href;
   const pageText = document.body?.innerText || '';
   if (/([?&#]|^)(login|signin|sign-in|signon|sso|passport)([=/?#]|$)/i.test(location.pathname + location.hash) || [...document.querySelectorAll('input[type="password"]')].some(e => e.getClientRects().length) || /请先登录|登录后查看|扫码登录/.test(pageText)) return { url, error: '需要先在官网登录，再打开我的投递页面' };
-  if (/验证码|身份证|简历编辑|编辑简历/.test(pageText)) return { url, error: '登录或简历编辑页面不发送给 AI' };
+  const resumeForm = [...document.querySelectorAll('form')].some(f => {
+    const text = f.innerText || '';
+    return /教育经历|工作经历|项目经历|实习经历|简历/.test(text) && f.querySelector('input,textarea');
+  });
+  if (/验证码|身份证/.test(pageText) || resumeForm) return { url, error: '登录或简历编辑页面不发送给 AI' };
   // "第 1 志愿" may render with spaces, full-width digits or no space at all.
   const rankRe = /第\s*[1-9一二三四五六七八九０-９0-9]\s*志愿/;
   const listTitle = /我的投递|我的申请|投递记录|申请记录|应聘记录|已完成的投递|进行中的投递|应聘进度|投递进度|申请进度|投递岗位|申请状态|应聘状态|当前状态|投递简历|内推投递|修改志愿顺序|意向城市/i;

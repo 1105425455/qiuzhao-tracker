@@ -4,9 +4,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { FIELDS, normalize, CAPTURE_HOSTS, progressCandidate, classifyDirection } from './model.mjs';
+import { FIELDS, normalize, CAPTURE_HOSTS, progressCandidate, classifyDirection, scopeToPosition } from './model.mjs';
 import { MODEL_CATALOG, apiForModel } from './models.mjs';
-import { analyze, recognizeImage, extractApplications } from './ai.mjs';
+import { analyze, recognizeImage, recognizeText, extractApplications } from './ai.mjs';
 import { normalizeEvent, legacyEventKey } from './calendar.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
@@ -464,29 +464,48 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (body.error) {
           let validSource = false;
           try { const source = new URL(body.url); validSource = source.origin === new URL(task.url).origin && !looksLikeLogin(source); } catch { /* Keep an unverified page out of the model. */ }
-          if (body.fallbackAllowed === true && validSource && batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '规则定位失败，自动用 800px 整页截图核对'; return send(200, { ok: true, needsAI: true }); }
+          if (body.fallbackAllowed === true && validSource && batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '规则定位失败，自动用截图核对'; return send(200, { ok: true, needsAI: true }); }
           return fail(String(body.error).slice(0, 300));
         }
-        if (typeof body.text !== 'string' || !body.text.trim() || body.text.length > 5000) return fail('未提取到单条记录原文或文本过长');
+        if (typeof body.text !== 'string' || !body.text.trim()) return fail('未提取到页面原文');
+        const text = body.text.slice(0, 8000);
         const source = new URL(body.url);
-        // Same-origin is enough; do not require the page text to literally repeat
-        // the stored position name (that caused many false "岗位不匹配" failures).
-        if (source.origin !== new URL(task.url).origin || looksLikeLogin(source)) return fail('登录失效或来源改变');
-        if (/验证码|密码|身份证|access_token|authorization/i.test(body.text)) return fail('原文可能包含敏感信息，未保留');
-        const parsed = progressCandidate(body.text);
-        if (parsed.ambiguous || !Object.keys(parsed.candidate).length) {
-          if (batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '规则不确定，等待单条卡片截图'; return send(200, { ok: true, needsAI: true }); }
-          return fail(parsed.ambiguous ? '原文状态冲突，需要人工核对' : '未识别到明确的当前步骤，原记录保留');
-        }
+        if (!samePage(source, new URL(task.url)) || looksLikeLogin(source)) return fail('登录失效或来源改变');
+        if (/验证码|密码|身份证|access_token|authorization/i.test(text)) return fail('原文可能包含敏感信息，未保留');
+        // Narrow the page text to the section around this job so rule parsing and
+        // (if needed) the AI focus on the right record instead of the whole page.
+        const scoped = scopeToPosition(text, task);
         const record = state.records.find(r => r.id === task.id);
-        let candidate;
-        try { candidate = normalize({ ...record, ...parsed.candidate }); } catch { return fail('新步骤与已有记录矛盾，需要人工核对'); }
-        task.candidate = { stage: candidate.stage, screening: candidate.screening };
-        task.evidence = parsed.evidence; task.checkedAt = new Date().toISOString(); task.method = '规则';
-        noteChecked(task.id, task.checkedAt);
-        task.status = candidate.stage === task.before.stage && candidate.screening === task.before.screening ? 'unchanged' : 'changed';
-        task.message = task.status === 'changed' ? '发现步骤变化' : '官网状态未变化';
-        return send(200, { ok: true });
+        const parsed = progressCandidate(scoped.text);
+        const applyCandidate = (candidate, evidence, method) => {
+          let normalized;
+          try { normalized = normalize({ ...record, ...candidate }); } catch { return fail('新步骤与已有记录矛盾，需要人工核对'); }
+          task.candidate = { stage: normalized.stage, screening: normalized.screening };
+          task.evidence = evidence; task.method = method; task.checkedAt = new Date().toISOString();
+          noteChecked(task.id, task.checkedAt);
+          task.status = normalized.stage === task.before.stage && normalized.screening === task.before.screening ? 'unchanged' : 'changed';
+          task.message = `${method}候选，等待批量确认`;
+          return send(200, { ok: true });
+        };
+        if (!parsed.ambiguous && Object.keys(parsed.candidate).length) return applyCandidate(parsed.candidate, parsed.evidence, '规则');
+        if (body.scope === 'page' && !scoped.found) {
+          if (batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '页面里没找到该岗位，自动用截图核对'; return send(200, { ok: true, needsAI: true }); }
+          return fail('页面文本里没有该岗位，可能需重新识别或手动核对');
+        }
+        if (batch.allowAI && provider().enabled) {
+          task.status = 'ai-running'; task.message = '正在用文本核对';
+          try {
+            const recognized = await recognizeText(provider(), { company: task.company, position: task.position }, scoped.text, fetchAI);
+            if (batch.id !== body.batchId || task.status !== 'ai-running') return send(409, { error: '任务已结束，丢弃迟到的 AI 结果' });
+            return applyCandidate(recognized.candidate, recognized.evidence, 'AI 文本');
+          } catch (error) {
+            const reason = error && error.message ? error.message : '未知原因';
+            // Text was unreadable for the model: fall back to a screenshot once.
+            if (scoped.text.trim().length > 40) { task.status = 'needs-image'; task.message = `文本核对未通过（${reason}），改用截图`; return send(200, { ok: true, needsAI: true }); }
+            return fail(`文本核对未通过：${reason}`);
+          }
+        }
+        return fail(parsed.ambiguous ? '原文状态冲突，需要人工核对' : '未识别到明确的当前步骤，原记录保留');
       }
       if (url.pathname === '/api/refresh/image') {
         const task = batch?.tasks.find(t => t.id === body.id);

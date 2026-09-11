@@ -31,6 +31,7 @@ async function visit(tabId, url) {
     catch (error) { lastError = error?.message || '导航被拒绝'; await wait(600); continue; }
     for (let n = 0; n < 15; n++) { await wait(500); if ((await chrome.tabs.get(tabId)).status === 'complete') break; }
     const actual = await chrome.tabs.get(tabId);
+    if (!actual || typeof actual.url !== 'string' || !actual.url) { lastError = '页面地址在加载中丢失'; await wait(600); continue; }
     let placed;
     try { placed = new URL(actual.url); } catch { throw new Error(`页面地址无效：${actual.url}`); }
     if (LOGIN_RE.test(`${placed.pathname}${placed.search}${placed.hash}`)) throw new Error(`页面要求登录：${placed.origin}${placed.pathname}，请在该浏览器完成登录后重试`);
@@ -202,7 +203,7 @@ async function run() {
           completed++;
         }
       };
-      await Promise.all(Array.from({ length: Math.min(4, tasks.length) }, () => worker()));
+      await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker()));
     }
     message = '本轮执行完成，请在台账查看结果并确认。';
   } catch (error) { message = error.message; }

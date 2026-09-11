@@ -49,51 +49,98 @@ export function normalize(record) {
   return out;
 }
 
-// Only explicit screening labels produce a candidate. Other stages never imply rejection.
+// Screening outcome. We look INSIDE each status phrase (not for an exact line),
+// so real-world wording like "简历初筛-筛选中" or "简历筛选 未通过" still maps.
 export function screeningCandidate(text) {
-  const lines = text.split(/\r?\n/).map(s => s.trim());
-  const map = new Map([
-    ['简历筛选通过', '通过'], ['简历初筛通过', '通过'], ['简历通过', '通过'],
-    ['简历筛选未通过', '未通过'], ['简历未通过', '未通过'], ['简历初筛未通过', '未通过'],
-    ['简历筛选中', '待反馈'], ['简历评估中', '待反馈'], ['简历待筛选', '待反馈']
-  ]);
-  const evidence = lines.filter(line => map.has(line));
-  const values = [...new Set(evidence.map(line => map.get(line)))];
-  return { screening: values.length === 1 ? values[0] : null, evidence: evidence.join('\n'), ambiguous: values.length > 1 };
+  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const hit = { reject: [], pass: [], pending: [] };
+  for (const line of lines) {
+    if (!/简历|初筛|筛选|评估/.test(line)) continue;
+    // Skip instructional/conditional text such as "如果简历未通过，请继续投递".
+    if (/如果|若|如未|一旦|请继续|可继续|将|会|若您|建议/.test(line)) continue;
+    // Rejection before anything else; a line saying "未通过" is a rejection.
+    if (/未通过|不通过|不合适|不匹配|淘汰|已拒绝|未入选/.test(line)) hit.reject.push(line);
+    else if (/通过|合格/.test(line)) hit.pass.push(line);
+    else if (/筛选中|评估中|待筛|初筛|筛选|评估|处理中|受理/.test(line)) hit.pending.push(line);
+  }
+  const evidence = [...hit.reject, ...hit.pass, ...hit.pending].join('\n');
+  const groups = [hit.reject.length && '未通过', hit.pass.length && '通过', hit.pending.length && '待反馈'].filter(Boolean);
+  return { screening: groups.length === 1 ? groups[0] : null, evidence, ambiguous: groups.length > 1 };
 }
 
 export function progressCandidate(text) {
-  const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-  const current = lines.filter(s => /^(当前状态|最新状态|当前进度|进度)[：:]/.test(s)).map(s => s.replace(/^[^：:]+[：:]\s*/, ''));
+  const lines = String(text || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const current = lines.filter(s => /(当前状态|最新状态|当前进度|进度|状态)[：:]/.test(s)).map(s => s.replace(/^[^：:]*[：:]\s*/, ''));
   const scope = current.length ? current : lines;
   const screening = screeningCandidate(scope.join('\n'));
-  const stageMap = new Map([
-    ['投递成功', '已投递'], ['已投递', '已投递'], ['简历筛选中', '已投递'],
-    ['待笔试', '笔试'], ['笔试中', '笔试'], ['笔试邀请', '笔试'], ['测评中', '笔试'], ['测评已完成', '笔试'], ['笔试-未处理', '笔试'],
-    ['面试中', '面试中'], ['面试邀请', '面试中'],
-    ['一面中', '一面'], ['待一面', '一面'], ['一面邀请', '一面'],
-    ['二面中', '二面'], ['待二面', '二面'], ['二面邀请', '二面'],
-    ['终面中', '终面'], ['终面邀请', '终面'], ['待终面', '终面'],
-    ['Offer', 'Offer'], ['OFFER', 'Offer'], ['已录用', 'Offer'], ['录用通知', 'Offer'],
-    ['流程结束', '已结束'], ['已结束', '已结束'], ['已撤回', '已撤回']
-  ]);
+  // Each stage is a set of keywords; whichever appears in the current status wins.
+  const rules = [
+    ['已撤回', /已撤回|撤销申请|主动撤回/],
+    ['已结束', /流程结束|已结束|职位关闭|岗位关闭|招聘结束|已终止/],
+    ['Offer', /offer|录用|已录用|拟录用|offer意向/i],
+    ['终面', /终面|总监面|hr面|终试/],
+    ['二面', /二面|复试|第二轮面/],
+    ['一面', /一面|初试|第一轮面/],
+    ['面试中', /面试|面试中|安排面试|待面试/],
+    ['笔试', /笔试|测评|在线考试|机考|笔试中|待笔试/],
+    ['已投递', /已投递|简历投递|投递成功|申请成功|待筛选|筛选中|评估中|初筛|待处理/]
+  ];
   const stages = [];
-  for (const s of scope) {
-    if (stageMap.has(s)) {
-      const stage = stageMap.get(s); if (!stages.includes(stage)) stages.push(stage);
-    } else if (/笔试|测评/.test(s)) {
-      if (!stages.includes('笔试')) stages.push('笔试');
-    } else if (/(^|[^一])面中|面试/.test(s)) {
-      if (!stages.includes('面试中')) stages.push('面试中');
+  for (const value of scope) {
+    for (const [stage, re] of rules) {
+      if (re.test(value) && !stages.includes(stage)) stages.push(stage);
     }
   }
-  const ambiguous = screening.ambiguous || stages.length > 1 || (screening.screening === '未通过' && stages.some(s => s !== '已结束'));
+  // Keep only the most advanced stage when several match a single status line.
+  const order = ['已撤回', '已结束', 'Offer', '终面', '二面', '一面', '面试中', '笔试', '已投递'];
+  const ranked = order.filter(s => stages.includes(s));
+  const chosen = ranked.length ? [ranked[0]] : [];
+  const ambiguous = screening.ambiguous || (screening.screening === '未通过' && chosen.some(s => s !== '已结束'));
   const candidate = {};
   if (!ambiguous) {
     if (screening.screening) candidate.screening = screening.screening;
-    if (stages.length === 1) candidate.stage = stages[0];
+    if (chosen.length === 1) candidate.stage = chosen[0];
     if (screening.screening === '未通过') candidate.stage = '已结束';
+    // Rejection wording implies the application ended.
+    if (!candidate.stage && /已拒绝|未入选/.test(scope.join('\n'))) candidate.stage = '已结束';
+    // A screening result implies the application was at least submitted.
+    if (!candidate.stage && candidate.screening && candidate.screening !== '未通过') candidate.stage = '已投递';
   }
-  const evidence = scope.filter(s => stageMap.has(s) || /笔试|测评|面|投递|简历|录用|Offer|流程|进度/i.test(s) || screening.evidence.split('\n').includes(s)).join('\n');
+  const evidence = scope.filter(s => rules.some(([, re]) => re.test(s)) || /简历|进度|状态|投递/.test(s)).join('\n');
   return { candidate, ambiguous, evidence };
+}
+
+// Narrow a whole-page text to the lines that belong to one application, using its
+// position (and company as a hint). Returns the surrounding window plus whether a
+// distinctive position token was actually found, so callers can tell "no such job
+// on this page" apart from "found it but the status is unclear".
+function tokens(value) {
+  return String(value || '').split(/[\s（）()【】\[\]·・,，、。.:：;；\-—_/\\/]+/).map(t => t.trim()).filter(t => t.length >= 2);
+}
+export function scopeToPosition(pageText, task) {
+  const lines = String(pageText || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+  const posTokens = [...new Set(tokens(task.position))];
+  const companyTokens = [...new Set(tokens(task.company))];
+  const compact = value => value.replace(/\s+/g, '');
+  const normCompact = compact(task.position);
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = compact(lines[i]);
+    if (!line) continue;
+    const strong = (normCompact.length >= 4 && line.includes(normCompact)) || posTokens.some(t => t.length >= 3 && line.includes(t.replace(/\s+/g, '')));
+    const companyHit = companyTokens.some(t => t.length >= 2 && line.includes(t));
+    if (strong) hits.push({ i, score: 2 });
+    else if (companyHit && posTokens.some(t => t.length >= 2 && line.includes(t))) hits.push({ i, score: 1 });
+  }
+  if (!hits.length) return { text: lines.join('\n').slice(0, 4000), found: false };
+  const best = hits.sort((a, b) => b.score - a.score)[0].i;
+  const start = Math.max(0, best - 3);
+  let end = Math.min(lines.length, best + 6);
+  // Stop at the next line that looks like another job heading, so a neighbouring
+  // record's status does not leak into this one's context.
+  for (let i = best + 1; i < end; i++) {
+    const line = compact(lines[i]);
+    if (/工程师|研究员|算法|开发|岗位|\(J\d+\)|（J\d+）|职位/.test(lines[i]) && !line.includes(normCompact)) { end = i; break; }
+  }
+  return { text: lines.slice(start, end).join('\n'), found: true, line: best };
 }
