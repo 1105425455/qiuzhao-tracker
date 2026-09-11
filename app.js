@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.11';
+const UI_VERSION = '2026-09-10.12';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -208,10 +208,9 @@ function renderBatch() {
   $('batchRows').innerHTML = tasks.map(t => `<tr><td><strong>${esc(t.company)}</strong><span class="cell-secondary">${esc(t.position)}</span></td><td>${esc(t.before.stage)}<span class="cell-secondary">简历${esc(t.before.screening)}</span></td><td>${t.candidate ? `${badge(t.candidate.stage, true)}<span class="cell-secondary">简历${esc(t.candidate.screening)} · ${esc(t.method)}</span><span class="cell-secondary">${esc(t.evidence)}</span>` : '--'}</td><td><span class="badge ${t.status === 'failed' ? 'fail' : t.status === 'changed' ? 'pass' : ['queued', 'needs-image', 'ai-running'].includes(t.status) ? 'pending' : ''}">${{ queued: '等待采集', 'needs-image': '等待截图', 'ai-running': 'AI 核对中', changed: '有变化', unchanged: '无变化', failed: '保留原记录' }[t.status]}</span><span class="cell-secondary">${esc(t.message)}</span></td></tr>`).join('');
   $('batchApply').disabled = !good || !!pending || !!batch?.applied; $('batchCancel').disabled = !pending; $('batchStart').disabled = pending > 0;
 }
-async function refreshBatch() { try { ({ batch } = await api('/api/refresh')); renderBatch(); const pending = (batch?.tasks || []).some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status)); if (batch && pending !== batchRunning) { batchRunning = pending; if (!pending) { state = await api('/api/state'); render(); } } } catch (error) { $('syncError').textContent = error.message; } }
+async function refreshBatch() { try { ({ batch } = await api('/api/refresh')); renderBatch(); $('syncError').textContent = ''; const pending = (batch?.tasks || []).some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status)); if (batch && pending !== batchRunning) { batchRunning = pending; if (!pending) { state = await api('/api/state'); render(); } } } catch (error) { $('syncError').textContent = `进度暂时读取失败，会自动重试：${error.message}`; } }
 $('syncOpen').onclick = () => { $('syncError').textContent = ''; $('batchAIState').textContent = state.aiEnabled ? `${state.aiModel} · 规则不确定时自动使用 800px 整页截图` : '自动 AI 兜底尚未启用，请先在连接设置中完成浏览器自检'; $('syncDialog').showModal(); refreshBatch(); clearInterval(polling); polling = setInterval(() => { if (!document.hidden) refreshBatch(); }, 3000); };
 $('syncDialog').addEventListener('close', () => { clearInterval(polling); polling = null; });
-$('batchRefresh').onclick = refreshBatch;
 $('batchStart').onclick = async () => {
   $('syncError').textContent = ''; $('batchStart').disabled = true; $('batchHint').textContent = '正在连接浏览器…'; let started = false;
   try { const connection = await browserBridge('PING'); if (connection.busy) throw new Error('已有浏览器任务执行中，请稍后再试'); ({ batch } = await api('/api/refresh/start', { baseRevision: state.revision })); started = true; await browserBridge('RUN'); renderBatch(); toast('浏览器已开始核对全部记录'); }
