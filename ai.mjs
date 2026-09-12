@@ -218,7 +218,10 @@ export async function extractApplications(config, input, request = fetch) {
     const program = typeof value.program === 'string' ? value.program.trim().slice(0, 150) : '';
     if (rows.some(row => row.cardIndex === index && row.record.position === value.position.trim() && row.record.applyTime === (applyTime && /^\d{4}-\d{2}-\d{2}$/.test(applyTime) ? applyTime : ''))) { warnings.push(`第 ${index + 1} 项存在同名且日期相同的重复候选，需核对申请编号`); continue; }
     const safeDate = applyTime && /^\d{4}-\d{2}-\d{2}$/.test(applyTime) && new Date(applyTime).toISOString().slice(0, 10) === applyTime ? applyTime : '';
-    rows.push({ index: rows.length, cardIndex: index, record: { company, rank: cleanRank, program, position: value.position.trim(), location: typeof value.location === 'string' ? value.location : '', applyTime: safeDate, stage, screening, rawStatus: (value.status || value.evidence).slice(0, 5000), url: input.url, source: '官网列表 AI 解析', sourceUid: card.group ? '' : card.uid || '', direction: classifyDirection(`${value.position} ${value.company}`) } });
+    // No usable date on the page: fall back to the day this page was recognized.
+    // Later checks never touch applyTime, so this stays as the original record date.
+    const fallbackDate = new Date().toLocaleDateString('en-CA');
+    rows.push({ index: rows.length, cardIndex: index, record: { company, rank: cleanRank, program, position: value.position.trim(), location: typeof value.location === 'string' ? value.location : '', applyTime: safeDate || fallbackDate, stage, screening, rawStatus: (value.status || value.evidence).slice(0, 5000), url: input.url, source: '官网列表 AI 解析', sourceUid: card.group ? '' : card.uid || '', direction: classifyDirection(`${value.position} ${value.company}`) } });
   }
   const unresolved = input.cards.map((_, index) => index).filter(index => !rows.some(row => row.cardIndex === index));
   return { rows, warnings, unresolved };

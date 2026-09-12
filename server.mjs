@@ -194,7 +194,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
     return rows.map(row => {
       const r = row.record;
       const scoped = state.records.filter(old => old.url === url);
-      const matches = scoped.filter(old => r.sourceUid ? old.sourceUid === r.sourceUid : r.applyTime && old.company === r.company && old.position === r.position && old.applyTime === r.applyTime);
+      const matches = scoped.filter(old => r.sourceUid ? old.sourceUid === r.sourceUid : old.company === r.company && old.position === r.position && (!old.applyTime || !r.applyTime || old.applyTime === r.applyTime));
       const uncertain = !r.sourceUid && !r.applyTime && scoped.some(old => old.company === r.company && old.position === r.position);
       return { ...row, targetId: matches.length === 1 ? matches[0].id : '', action: matches.length > 1 || uncertain ? 'conflict' : matches.length === 1 ? 'update' : 'add' };
     });
@@ -347,7 +347,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         for (const [index, card] of cards.entries()) {
           const parsed = progressCandidate(card.text);
           if (card.group || !job.company || !card.position || !card.text.includes(card.position) || parsed.ambiguous || !Object.keys(parsed.candidate).length) continue;
-          const date = card.text.match(/(?:投递|申请|应聘)时间\s*[：:]?\s*(\d{4}-\d{2}-\d{2})/)?.[1] || '';
+          const date = card.text.match(/(?:投递|申请|应聘)时间\s*[：:]?\s*(\d{4}-\d{2}-\d{2})/)?.[1] || new Date().toLocaleDateString('en-CA');
           try {
             const record = normalize({ company: job.company, position: card.position, applyTime: date, stage: parsed.candidate.stage || '简历筛选中', screening: parsed.candidate.screening || '待反馈', url: job.url, rawStatus: parsed.evidence, source: '官网列表规则', sourceUid: card.uid, direction: classifyDirection(card.position) });
             ruleRows.push({ index, record });

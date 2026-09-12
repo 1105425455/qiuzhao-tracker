@@ -401,7 +401,7 @@ test('whole-page AI extracts multiple positions without inventing dates or rejec
   ];
   const input = { url: 'https://app.mokahr.com/campus-recruitment/test/#/applications', company: '', cards: [{ text: '我的投递', image: png, group: true }] };
   const result = await extractApplications(config, input, async (_, options) => { const body = JSON.parse(options.body); assert.equal(body.messages[1].content.at(-1).type, 'image_url'); return fakeReply({ applications }); });
-  assert.equal(result.rows.length, 2); assert.equal(result.rows[0].record.company, '测试企业'); assert.equal(result.rows[0].record.applyTime, ''); assert.equal(result.rows[1].record.screening, '待反馈');
+  assert.equal(result.rows.length, 2); assert.equal(result.rows[0].record.company, '测试企业'); assert.equal(result.rows[0].record.applyTime, new Date().toLocaleDateString('en-CA')); assert.equal(result.rows[1].record.screening, '待反馈');
   assert.equal(new Set(result.rows.map(row => row.index)).size, 2);
   const refused = await extractApplications(config, input, async () => fakeReply({ applications: [{ ...applications[0], stage: '已结束', screening: '未通过', evidence: '流程结束' }] }));
   assert.equal(refused.rows.length, 0);
@@ -419,9 +419,9 @@ test('record page trusts listed items but rejects invented dates and rejection',
   // No explicit rejection wording => reject the row instead of marking 未通过.
   const bad = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-09-03', stage: '已结束', screening: '未通过', evidence: '流程结束' }] }));
   assert.equal(bad.rows.length, 0); assert(bad.warnings.length >= 1);
-  // Invalid calendar date must be dropped, not saved as-is.
+  // Invalid calendar date must be dropped and replaced by the recognition day.
   const badDate = await extractApplications(config, input, async () => fakeReply({ applications: [{ index: 0, applied: true, confidence: 'high', company: '', position: '算法工程师', applyTime: '2026-02-30', stage: '简历筛选中', screening: '待反馈', evidence: '投递 2026-02-30' }] }));
-  assert.equal(badDate.rows.length, 1); assert.equal(badDate.rows[0].record.applyTime, ''); assert(badDate.warnings.some(w => /日期/.test(w)));
+  assert.equal(badDate.rows.length, 1); assert.equal(badDate.rows[0].record.applyTime, new Date().toLocaleDateString('en-CA')); assert(badDate.warnings.some(w => /日期/.test(w)));
 });
 
 test('Moka page discovery runs rules then whole-page AI, previews and confirms multiple records', async () => {
