@@ -10,6 +10,7 @@ import { analyze, recognizeImage, recognizeText, extractApplications } from './a
 import { normalizeEvent, legacyEventKey } from './calendar.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
+const EXTENSION_VERSION = '0.4.0';
 const Papa = createRequire(import.meta.url)('./vendor/papaparse.js');
 const files = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']],
@@ -181,7 +182,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
     console.log(JSON.stringify(entry));
   }
   function browserReady() {
-    if (Date.now() - bridge.lastSeen > 15000 || bridge.version !== '0.3.0') throw new Error('浏览器采集扩展未连接或版本过旧，尚未执行。请在连接设置中连接 0.3.0 版扩展');
+    if (Date.now() - bridge.lastSeen > 15000 || bridge.version !== EXTENSION_VERSION) throw new Error(`浏览器采集扩展未连接或版本过旧，尚未执行。请在连接设置中连接 ${EXTENSION_VERSION} 版扩展`);
   }
   function pageResult() {
     if (!pageJob) return { job: null };
@@ -205,7 +206,11 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
   };
   const batchResult = () => {
     if (!batch) return { batch: null };
-    if (Date.now() - Date.parse(batch.at) > 60 * 60 * 1000) for (const task of batch.tasks) if (['queued', 'needs-image', 'ai-running'].includes(task.status)) { task.status = 'failed'; task.message = '本轮核对超时，请重新发起'; }
+    const age = Date.now() - Date.parse(batch.at);
+    if (age > 60 * 60 * 1000) for (const task of batch.tasks) if (['queued', 'needs-image', 'ai-running'].includes(task.status)) { task.status = 'failed'; task.message = '本轮核对超时，请重新发起'; }
+    // A browser tab can hang on a single page (network or debugger). Fail only the
+    // task that stopped making progress so the rest of the batch can finish.
+    for (const task of batch.tasks) if (['needs-image', 'ai-running'].includes(task.status) && Date.now() - Date.parse(task.checkedStart || task.at || batch.at) > 3 * 60 * 1000) { task.status = 'failed'; task.message = '该记录长时间没有结果，已跳过；原记录保留'; }
     return { batch };
   };
   function save(records, events = state.events) {
@@ -285,7 +290,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
       try { body = JSON.parse(raw); } catch { throw new Error('JSON 格式不正确'); }
       if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('请求格式不正确');
       if (url.pathname === '/api/bridge/hello') {
-        if (body.version !== '0.3.0') throw new Error('请更新官网采集扩展至 0.3.0');
+        if (body.version !== EXTENSION_VERSION) throw new Error(`请更新官网采集扩展至 ${EXTENSION_VERSION}`);
         bridge = { version: body.version, lastSeen: Date.now() };
         return send(200, { ok: true });
       }
@@ -473,19 +478,21 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (body.error) {
           let validSource = false;
           try { const source = new URL(body.url); validSource = source.origin === new URL(task.url).origin && !looksLikeLogin(source); } catch { /* Keep an unverified page out of the model. */ }
-          if (body.fallbackAllowed === true && validSource && batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '规则定位失败，自动用截图核对'; return send(200, { ok: true, needsAI: true }); }
+          if (body.fallbackAllowed === true && validSource && batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '规则定位失败，自动用截图核对'; task.checkedStart = new Date().toISOString(); return send(200, { ok: true, needsAI: true }); }
           return fail(String(body.error).slice(0, 300));
         }
         if (typeof body.text !== 'string' || !body.text.trim()) return fail('未提取到页面原文');
-        const text = body.text.slice(0, 8000);
+        // Keep the whole page: several trackers may share one URL, and a later
+        // record can sit far below the first one in the page text.
+        const text = body.text.slice(0, 20000);
         const source = new URL(body.url);
-        if (!samePage(source, new URL(task.url)) || looksLikeLogin(source)) return fail('登录失效或来源改变');
+        const loginish = /请先登录|登录后查看|扫码登录|登录失效|请登录/.test(text);
+        log({ event: 'refresh.read', requestId, task: task.id, company: task.company, url: `${source.origin}${source.pathname}`, textLength: text.length, scope: body.scope || 'page', loginish, matches: /简历|进度|状态|投递/.test(text) });
+        if (!samePage(source, new URL(task.url))) return fail(`页面跳到了其他地址：${source.origin}${source.pathname}，可能要求登录或来源已改变`);
+        if (looksLikeLogin(source)) return fail(`页面跳到了登录地址：${source.origin}${source.pathname}，请在该浏览器完成登录后重试`);
+        if (loginish && text.length < 200) return fail('页面要求登录，请在该浏览器完成登录后重试');
         if (/验证码|密码|身份证|access_token|authorization/i.test(text)) return fail('原文可能包含敏感信息，未保留');
-        // Narrow the page text to the section around this job so rule parsing and
-        // (if needed) the AI focus on the right record instead of the whole page.
-        const scoped = scopeToPosition(text, task);
         const record = state.records.find(r => r.id === task.id);
-        const parsed = progressCandidate(scoped.text);
         const applyCandidate = (candidate, evidence, method) => {
           let normalized;
           try { normalized = normalize({ ...record, ...candidate }); } catch { return fail('新步骤与已有记录矛盾，需要人工核对'); }
@@ -496,25 +503,20 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
           task.message = `${method}候选，等待批量确认`;
           return send(200, { ok: true });
         };
-        if (!parsed.ambiguous && Object.keys(parsed.candidate).length) return applyCandidate(parsed.candidate, parsed.evidence, '规则');
-        if (body.scope === 'page' && !scoped.found) {
-          if (batch.allowAI && provider().enabled) { task.status = 'needs-image'; task.message = '页面里没找到该岗位，自动用截图核对'; return send(200, { ok: true, needsAI: true }); }
-          return fail('页面文本里没有该岗位，可能需重新识别或手动核对');
-        }
         if (batch.allowAI && provider().enabled) {
-          task.status = 'ai-running'; task.message = '正在用文本核对';
+          task.status = 'ai-running'; task.message = '正在用文本核对'; task.checkedStart = new Date().toISOString();
           try {
-            const recognized = await recognizeText(provider(), { company: task.company, position: task.position }, scoped.text, fetchAI);
+            const recognized = await recognizeText(provider(), { company: task.company, position: task.position }, text, fetchAI);
             if (batch.id !== body.batchId || task.status !== 'ai-running') return send(409, { error: '任务已结束，丢弃迟到的 AI 结果' });
             return applyCandidate(recognized.candidate, recognized.evidence, 'AI 文本');
           } catch (error) {
             const reason = error && error.message ? error.message : '未知原因';
             // Text was unreadable for the model: fall back to a screenshot once.
-            if (scoped.text.trim().length > 40) { task.status = 'needs-image'; task.message = `文本核对未通过（${reason}），改用截图`; return send(200, { ok: true, needsAI: true }); }
+            if (text.trim().length > 40) { task.status = 'needs-image'; task.message = `文本核对未通过（${reason}），改用截图`; return send(200, { ok: true, needsAI: true }); }
             return fail(`文本核对未通过：${reason}`);
           }
         }
-        return fail(parsed.ambiguous ? '原文状态冲突，需要人工核对' : '未识别到明确的当前步骤，原记录保留');
+        return fail('未启用 AI，无法自动判断当前状态');
       }
       if (url.pathname === '/api/refresh/image') {
         const task = batch?.tasks.find(t => t.id === body.id);
@@ -522,14 +524,14 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (new URL(body.url).origin !== new URL(task.url).origin || looksLikeLogin(new URL(body.url))) throw new Error('截图来源不匹配或为登录页');
         task.status = 'ai-running'; task.message = '正在核对截图';
         try {
-          const parsed = await recognizeImage(provider(), task, body.image, fetchAI);
+           const parsed = await recognizeImage(provider(), task, body.images || body.image, fetchAI);
           if (batch.id !== body.batchId || task.status !== 'ai-running') return send(409, { error: '任务已结束，丢弃迟到的 AI 结果' });
           const record = state.records.find(r => r.id === task.id);
           const candidate = normalize({ ...record, ...parsed.candidate });
           task.candidate = { stage: candidate.stage, screening: candidate.screening }; task.evidence = parsed.evidence; task.method = 'AI 截图'; task.checkedAt = new Date().toISOString();
           noteChecked(task.id, task.checkedAt);
           task.status = candidate.stage === task.before.stage && candidate.screening === task.before.screening ? 'unchanged' : 'changed'; task.message = 'AI 截图候选，等待批量确认';
-        } catch (error) { if (task.status === 'ai-running') { task.status = 'failed'; task.message = `截图识别未通过：${error && error.message ? error.message : '未知原因'}`; log({ event: 'refresh.image.failed', requestId, task: task.id, reason: error && error.message }); } }
+        } catch (error) { if (task.status === 'ai-running') { task.status = 'failed'; task.message = `截图识别未通过：${error && error.message ? error.message : '未知原因'}`; log({ event: 'refresh.image.failed', requestId, task: task.id, company: task.company, reason: error && error.message }); } }
         return send(200, { ok: true });
       }
       if (url.pathname === '/api/refresh/apply') {

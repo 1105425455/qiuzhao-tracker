@@ -52,19 +52,33 @@ function extractText(api, output) {
   return output?.choices?.[0]?.message?.content;
 }
 
-async function complete(config, messages, request, structured = false, maxTokens = 1500, timeoutMs = 45000) {
+async function complete(config, messages, request, structured = false, maxTokens = 5000, timeoutMs = 45000) {
   if (!config?.enabled) throw new Error('AI 尚未启用，接口验收完成后才可发送');
   validateProvider(config);
   const api = apiForModel(config.model, config.apiFormat);
   const { url, headers, body } = buildRequest(config, messages, { structured, maxTokens });
-  let response;
-  try {
-    response = await request(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers, body: JSON.stringify(body) });
-  } catch (error) { throw new Error(`AI 接口连接失败或超时（${error?.name || 'error'}）`); }
-  if (!response.ok) { let detail = ''; try { const payload = await response.json(); detail = payload?.error?.message || payload?.msg || payload?.error || ''; } catch { /* non-JSON error body */ } throw new Error(`AI 接口返回 HTTP ${response.status}${detail ? `：${String(detail).slice(0, 160)}` : '；请核对密钥权限和模型名'}`); }
-  let output;
-  try { output = await response.json(); } catch { throw new Error('AI 接口返回格式无法解析'); }
-  const text = extractText(api, output);
+  const call = async () => {
+    let response;
+    try {
+      response = await request(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers, body: JSON.stringify(body) });
+    } catch (error) { throw new Error(`AI 接口连接失败或超时（${error?.name || 'error'}）`); }
+    if (!response.ok) { let detail = ''; try { const payload = await response.json(); detail = payload?.error?.message || payload?.msg || payload?.error || ''; } catch { /* non-JSON error body */ } throw new Error(`AI 接口返回 HTTP ${response.status}${detail ? `：${String(detail).slice(0, 160)}` : '；请核对密钥权限和模型名'}`); }
+    let output;
+    try { output = await response.json(); } catch { throw new Error('AI 接口返回格式无法解析'); }
+    const choice = output?.choices?.[0];
+    return { text: extractText(api, output), truncated: choice?.finish_reason === 'length' };
+  };
+  let result = await call();
+  // Reasoning models can spend the whole budget "thinking" and return an empty
+  // message. Retry once with a bigger budget instead of failing the record.
+  if ((typeof result.text !== 'string' || !result.text.trim()) && result.truncated) {
+    const bigger = buildRequest(config, messages, { structured, maxTokens: Math.max(maxTokens * 2, 10000) });
+    try {
+      const retry = await request(url, { method: 'POST', redirect: 'error', signal: AbortSignal.timeout(timeoutMs), headers: bigger.headers, body: JSON.stringify(bigger.body) });
+      if (retry.ok) { const output = await retry.json(); result = { text: extractText(api, output), truncated: output?.choices?.[0]?.finish_reason === 'length' }; }
+    } catch { /* keep the original empty result */ }
+  }
+  const text = result.text;
   if (typeof text !== 'string' || !text.trim()) throw new Error('模型没有返回文字结果（可能被内容策略拦截、模型不支持图片或达到长度上限）');
   return { text: text.slice(0, 40000) };
 }
@@ -128,27 +142,27 @@ function candidateFromModel(value, task) {
   if (value.found === false || /不确定|看不清|找不到/.test(stage)) throw new Error('页面里没有明确找到该岗位的当前状态');
   if (!ALLOWED_STAGES.includes(stage)) throw new Error('AI 返回的状态无法识别');
   if (screening && !ALLOWED_SCREEN.includes(screening)) throw new Error('AI 返回的筛选结果无法识别');
-  if (value.position && !positionMatches(value.position, task.position)) throw new Error('岗位不匹配');
-  if (screening === '未通过' && !/简历.{0,12}(未通过|不通过|不合适|不匹配|淘汰)/.test(evidence)) throw new Error('缺少明确的简历未通过证据');
   return { candidate: { stage, ...(screening ? { screening } : {}) }, evidence: evidence || stage };
 }
 
 export async function recognizeImage(config, task, image, request = fetch) {
-  validateScreenshot(image);
+  const images = Array.isArray(image) ? image : [image];
+  if (images.length > 24) throw new Error('页面截图分段过多');
+  images.forEach(validateScreenshot);
   const reply = await complete(config, [
     { role: 'system', content: '这是招聘投递进度页的截图。找到指定岗位对应的那一条申请，判断它当前处于哪一步。进度条上灰色、未到达的步骤不算，标了“已完成”的历史步骤也不算，只认“当前”那一步。只返回JSON：{"position":"该岗位名称","stage":"简历筛选中|笔试|面试|Offer|已结束|已撤回","screening":"待反馈|通过|未通过","evidence":"当前状态原文"}。看不清或找不到该岗位时 stage 填“不确定”。' },
-    { role: 'user', content: [{ type: 'text', text: `岗位：${task.position}\n公司：${task.company}` }, { type: 'image_url', image_url: { url: image, detail: 'high' } }] }
-  ], request, true, 600, 60000);
+     { role: 'user', content: [{ type: 'text', text: `岗位：${task.position}\n公司：${task.company}\n下面是同一页面的连续分段截图，请综合判断：` }, ...images.map(item => ({ type: 'image_url', image_url: { url: item, detail: 'high' } }))] }
+  ], request, true, 5000, 60000);
   const value = parseLooseJson(reply.text);
   return candidateFromModel(Array.isArray(value?.applications) ? value.applications[0] : value, task);
 }
 
 export async function recognizeText(config, task, text, request = fetch) {
-  if (typeof text !== 'string' || !text.trim() || text.length > 12000) throw new Error('页面文本缺失或过长');
+  if (typeof text !== 'string' || !text.trim() || text.length > 20000) throw new Error('页面文本缺失或过长');
   const reply = await complete(config, [
     { role: 'system', content: '这是招聘投递进度页的文本。找到指定岗位对应的那一条申请，判断它当前处于哪一步。灰色、未到达或标了“已完成”的步骤都不算，只认“当前”那一步。只返回JSON：{"position":"该岗位名称","stage":"简历筛选中|笔试|面试|Offer|已结束|已撤回","screening":"待反馈|通过|未通过","evidence":"当前状态原文"}。看不清或找不到该岗位时 stage 填“不确定”。' },
     { role: 'user', content: `岗位：${task.position}\n公司：${task.company}\n页面文本：\n${text}` }
-  ], request, true, 600, 60000);
+  ], request, true, 5000, 60000);
   const value = parseLooseJson(reply.text);
   return candidateFromModel(Array.isArray(value?.applications) ? value.applications[0] : value, task);
 }

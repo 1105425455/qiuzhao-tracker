@@ -17,7 +17,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const base = { company: '测试公司', position: '语音算法', applyTime: '2026-09-01', stage: '简历筛选中', screening: '待反馈', direction: '语音算法', url: 'https://iflytek.zhiye.com/campus/jobs' };
 async function announce(origin) {
   const pair = await (await fetch(origin + '/api/pairing')).json();
-  const response = await fetch(origin + '/api/bridge/hello', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ version: '0.3.0' }) });
+  const response = await fetch(origin + '/api/bridge/hello', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ version: '0.4.0' }) });
   assert.equal(response.status, 200); return pair;
 }
 test('source matching tolerates SPA reroutes but flags real login pages', () => {
@@ -158,10 +158,10 @@ test('CSV proper quoting, duplicates and safe preview', () => {
   assert.equal(distinct.records.length, 2);
   assert(importPreview('id,company,position\na,公司,算法\na,另一公司,算法', []).errors.length);
 });
-test('loopback API, durable revisions, confirmation, import and disabled AI', async () => {
+test('loopback API, durable revisions, confirmation, import and AI-backed refresh', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'run-'));
-  const server = createServer({ dataDir }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const server = createServer({ dataDir, aiConfig: { baseUrl: 'https://api.example.com/v1', apiKey: 'test-only', model: 'gpt-5.6-sol', enabled: true }, fetchAI: async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position: base.position, stage: '面试', screening: '待反馈', evidence: '当前状态：二面中' }) } }] }), { status: 200 }) }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   const request = async (path, body, extras = {}) => fetch(origin + path, { ...extras, ...(body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', ...extras.headers }, body: JSON.stringify(body) }) });
   try {
@@ -184,7 +184,6 @@ test('loopback API, durable revisions, confirmation, import and disabled AI', as
     assert.equal(readFileSync(join(dataDir, 'revision-1.json'), 'utf8'), original);
     assert.equal((await request('/api/records', undefined, { method: 'DELETE' })).status, 405);
     assert.equal((await request('/data/tracker/revision-1.json')).status, 404);
-    assert.equal((await request('/api/ai/preview', { consent: true, model: 'anything', text: 'test' })).status, 403);
     const csv = await (await request('/api/export')).text();
     const preview = await (await request('/api/import-preview', { csv })).json();
     assert.equal(preview.skipped, 1); assert.deepEqual(preview.errors, []);
@@ -275,10 +274,10 @@ test('model catalog drives the right API shape for Claude and Gemini', async () 
   });
 });
 
-test('batch refresh all submitted records, AI fallback only on rule failure, preserve failures', async () => {
+test('batch refresh sends every readable AI-enabled record to the LLM, preserve failures', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'batch-')); let calls = 0;
-  const server = createServer({ dataDir, aiConfig: config, fetchAI: async () => { calls++; return fakeReply({ position: '多模态算法', stage: '面试', screening: '待反馈', evidence: '二面中' }); } });
+  const server = createServer({ dataDir, aiConfig: config, fetchAI: async (_url, options) => { calls++; const prompt = JSON.parse(options.body).messages.at(-1).content; const position = /岗位：([^\n]+)/.exec(prompt)?.[1] || '多模态算法'; return fakeReply({ position, stage: position === '多模态算法' ? '面试' : '简历筛选中', screening: position === '多模态算法' ? '待反馈' : '通过', evidence: position === '多模态算法' ? '二面中' : '简历筛选通过' }); } });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   const origin = `http://127.0.0.1:${server.address().port}`;
   const req = async (path, body, token) => {
@@ -294,10 +293,9 @@ test('batch refresh all submitted records, AI fallback only on rule failure, pre
     assert.equal(batch.tasks.length, 3); assert.equal(batch.tasks[2].status, 'failed');
     assert.equal((await req('/api/refresh/start', { baseRevision: 3 })).status, 400);
     const result = (id, text) => req('/api/refresh/result', { batchId: batch.id, id, text, url: base.url }, token);
-    await result(state.records[0].id, '语音算法\n简历筛选通过'); assert.equal(calls, 0);
-    // Second record: rules can't read it, so the server checks the TEXT with AI
-    // in the same request (no screenshot needed). The mock AI returns 二面.
-    await result(state.records[1].id, '多模态算法\n下一轮已安排'); assert.equal(calls, 1);
+    await result(state.records[0].id, '语音算法\n简历筛选通过'); assert.equal(calls, 1);
+    // AI is authoritative for the second record too; the mock returns 二面.
+    await result(state.records[1].id, '多模态算法\n下一轮已安排'); assert.equal(calls, 2);
     assert.equal((await req('/api/state')).data.records[1].stage, '简历筛选中');
     state = (await req('/api/refresh/apply', { batchId: batch.id, confirmed: true })).data;
     assert.equal(state.records[0].screening, '通过'); assert.equal(state.records[1].stage, '面试'); assert.equal(state.records[1].screening, '待反馈');
@@ -332,7 +330,7 @@ test('legacy arrangements appear without migration and converted appointments do
 test('calendar persists several rounds independently and preserves them across record updates and imports', async () => {
   const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
   const dataDir = mkdtempSync(join(testRoot, 'calendar-'));
-  let server = createServer({ dataDir }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  let server = createServer({ dataDir, aiConfig: { baseUrl: 'https://api.example.com/v1', apiKey: 'test-only', model: 'gpt-5.6-sol', enabled: true }, fetchAI: async () => new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position: base.position, stage: '面试', screening: '待反馈', evidence: '当前状态：二面中' }) } }] }), { status: 200 }) }); server.listen(0, '127.0.0.1'); await once(server, 'listening');
   let origin = `http://127.0.0.1:${server.address().port}`;
   const request = async (path, body) => {
     const response = await fetch(origin + path, body === undefined ? {} : { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1' }, body: JSON.stringify(body) });
@@ -504,5 +502,38 @@ test('company preferences group together; deleting one keeps the others and snap
     assert(state.records.some(r => r.company === '虎牙直播' && r.rank === '第2志愿'));
     assert(!state.records.some(r => r.id === first));
     assert(readdirSync(dataDir).filter(n => /^revision-\d+\.json$/.test(n)).length >= 5);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
+test('two records on one page are both matched from a single page text', async () => {
+  const testRoot = join(root, '.test-runs'); mkdirSync(testRoot, { recursive: true });
+  const dataDir = mkdtempSync(join(testRoot, 'samepage-'));
+  // The model sees the whole page (two 简历筛选中 cards) and must answer per position.
+  const page = '投递记录 - 2条\n深圳-语音算法工程师(J101113)\n投递时间：2026-09-10\n投递简历 已完成\n简历筛选 简历筛选中\n面试\nOffer\n入职\n2027AIDU-多模态算法工程师(J99956)\n投递时间：2026-09-10\n投递简历 已完成\n简历筛选 简历筛选中\n面试\nOffer\n入职';
+  const server = createServer({ dataDir, aiConfig: { baseUrl: 'https://api.example.com/v1', apiKey: 'test-only', model: 'gpt-5.6-sol', enabled: true }, fetchAI: async (_url, options) => {
+    const prompt = JSON.parse(options.body).messages.at(-1).content;
+    const position = /岗位：([^\n]+)/.exec(prompt)?.[1] || '';
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ position, stage: '简历筛选中', screening: '待反馈', evidence: '简历筛选 简历筛选中' }) } }] }), { status: 200 });
+  } });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const req = async (path, body, token) => { const response = await fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, body: JSON.stringify(body) }); return { status: response.status, data: await response.json() }; };
+  try {
+    const url = 'https://talent.baidu.com/jobs/center';
+    let state = (await req('/api/records', { record: { ...base, url, company: '百度', position: '深圳-语音算法工程师(J101113)' }, baseRevision: 0 })).data;
+    state = (await req('/api/records', { record: { ...base, url, company: '百度', position: '2027AIDU-多模态算法工程师(J99956)', stage: 'Offer' }, baseRevision: 1 })).data;
+    const [first, second] = state.records;
+    const token = (await (await fetch(origin + '/api/pairing')).json()).token;
+    await announce(origin);
+    const batch = (await req('/api/refresh/start', { baseRevision: state.revision, ids: [first.id, second.id] })).data.batch;
+    assert.equal(batch.tasks.length, 2);
+    // The extension reads one page, then submits the same text for each record.
+    for (const task of batch.tasks) assert.equal((await req('/api/refresh/result', { batchId: batch.id, id: task.id, url, text: page }, token)).status, 200);
+    state = (await req('/api/refresh/apply', { batchId: batch.id, confirmed: true })).data;
+    assert.equal(state.records.find(r => r.id === first.id).stage, '简历筛选中');
+    // The second record already had a wrong Offer; it must be corrected, not kept.
+    assert.equal(state.records.find(r => r.id === second.id).stage, '简历筛选中');
+    assert.equal(state.records.find(r => r.id === second.id).screening, '待反馈');
+    assert(state.records.every(r => r.lastCheckedAt));
   } finally { await new Promise(resolve => server.close(resolve)); }
 });

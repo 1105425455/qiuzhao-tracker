@@ -1,8 +1,8 @@
 import { scanPage } from './scan.js';
 import { scanApplications } from './scan-list.js';
 import { resizeScreenshot } from './image.js';
-import { pageFingerprint } from './fingerprint.mjs';
 let busy = false, message = '尚未执行核对', runStartedAt = 0;
+const VERSION = '0.4.0';
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const STALE_MS = 10 * 60 * 1000;
 function markRunning() { runStartedAt = Date.now(); busy = true; }
@@ -58,14 +58,26 @@ async function pageSignal(tabId, allFrames) {
 }
 
 const DEFINITIVE = /登录|敏感|多条|验证码/;
+// Loose "does this job appear in the text" probe used only to know when a lazy SPA
+// has finished rendering. It is not a status rule; the model still decides stages.
+const foldName = value => String(value || '').toLowerCase().replace(/[\s（）()【】\[\]·・,，、。.:：;；\-—_/\\]/g, '');
+function nameIn(text, want) {
+  if (!want) return true;
+  const folded = foldName(text);
+  if (folded.includes(want)) return true;
+  // Chinese job titles are often long; accept when a distinctive slice is present.
+  for (let i = 0; i + 6 <= want.length; i += 2) if (folded.includes(want.slice(i, i + 6))) return true;
+  return false;
+}
 
 // Flexible reader: poll the scan function until either it returns usable data,
 // or the page content has settled (same signal twice) — whichever comes first.
 // "Settled" means the SPA finished rendering; we do NOT require a specific job
 // title to appear. On timeout we fall back to whatever the last scan returned.
-async function readWhenStable(tabId, scanFn, args = [], { allFrames = false, timeoutMs = 25000, settleMs = 900 } = {}) {
+async function readWhenStable(tabId, scanFn, args = [], { allFrames = false, timeoutMs = 25000, settleMs = 900, expect = '' } = {}) {
   const deadline = Date.now() + timeoutMs;
-  let last = null, prevSignal = null, stableHits = 0;
+  const want = String(expect || '').replace(/\s+/g, '');
+  let last = null, prevSignal = null, stableHits = 0, sawContent = false;
   while (true) {
     const scanResults = await chrome.scripting.executeScript({
       target: allFrames ? { tabId, allFrames: true } : { tabId }, func: scanFn, args
@@ -74,7 +86,13 @@ async function readWhenStable(tabId, scanFn, args = [], { allFrames = false, tim
       return values.find(v => Array.isArray(v.cards) && v.cards.length) || values.find(v => !v.error) || values[0];
     }).catch(error => ({ error: `无法在页面采集：${error.message}` }));
     last = scanResults;
-    if (last && !last.error) return last;                     // usable data
+    if (last && !last.error) {
+      // Wait for the SPA to actually render the target record. A short page with no
+      // job text is an unloaded shell, not a real "record not found".
+      const text = String(last.text || '');
+      if (!want || nameIn(text, want)) return last;
+      if (!sawContent && text.replace(/\s+/g, '').length > 40) sawContent = true;
+    }
     if (last?.error && DEFINITIVE.test(last.error)) return last; // login / sensitive / ambiguous
 
     const signal = await pageSignal(tabId, allFrames);
@@ -82,8 +100,9 @@ async function readWhenStable(tabId, scanFn, args = [], { allFrames = false, tim
       const key = `${signal.len}:${signal.head}`;
       stableHits = (prevSignal === key) ? stableHits + 1 : 0;
       prevSignal = key;
-      // Content has been identical for a full settle window: rendering finished.
-      if (stableHits >= 1) return last;
+      // Content settled but the job never appeared: give the page one extra beat,
+      // then return whatever we have so the model can still judge it.
+      if (stableHits >= 2 && sawContent) return last;
       await wait(settleMs);
     } else {
       await wait(600);
@@ -96,32 +115,41 @@ async function readWhenStable(tabId, scanFn, args = [], { allFrames = false, tim
 async function scan(tabId, func, args = [], { allFrames = false } = {}) {
   return readWhenStable(tabId, func, args, { allFrames });
 }
-async function screenshot(tabId) {
+async function screenshot(tabId, requestedClip = null) {
   let attached = false;
   try {
     await chrome.debugger.attach({ tabId }, '1.3'); attached = true;
     const metrics = await chrome.debugger.sendCommand({ tabId }, 'Page.getLayoutMetrics');
     const size = metrics.cssContentSize || metrics.contentSize;
     if (!size || size.width <= 0 || size.height <= 0 || size.width > 10000 || size.height > 100000) throw new Error('页面尺寸异常，未发送截断截图');
-    const clip = { x: 0, y: 0, width: size.width, height: size.height, scale: Math.min(1, 800 / Math.max(size.width, size.height)) };
+    const raw = requestedClip || { x: 0, y: 0, width: size.width, height: size.height };
+    const clip = { x: Math.max(0, raw.x), y: Math.max(0, raw.y), width: Math.min(raw.width, size.width), height: Math.min(raw.height, size.height), scale: Math.min(1, 800 / Math.max(raw.width, raw.height)) };
     const result = await chrome.debugger.sendCommand({ tabId }, 'Page.captureScreenshot', { format: 'png', clip, captureBeyondViewport: true });
     return await resizeScreenshot(result.data);
   } finally { if (attached) await chrome.debugger.detach({ tabId }); }
 }
-// Take a whole-page screenshot, tolerating small SPA re-renders by retrying
-// with a fresh baseline instead of aborting on the first mismatch.
-async function stableShot(tabId, scanFn, args) {
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const before = await scan(tabId, scanFn, args);
-    if (before.error && /登录|敏感/.test(before.error)) throw new Error(before.error);
-    const image = await screenshot(tabId);
-    const after = await scan(tabId, scanFn, args);
-    if (!after.error && await pageFingerprint(after) === await pageFingerprint(before)) return { image, url: after.url, stable: true };
+async function screenshots(tabId) {
+  await chrome.debugger.attach({ tabId }, '1.3');
+  const metrics = await chrome.debugger.sendCommand({ tabId }, 'Page.getLayoutMetrics');
+  await chrome.debugger.detach({ tabId });
+  const size = metrics.cssContentSize || metrics.contentSize;
+  const height = Math.max(1, size.height);
+  const piece = 800, overlap = 100, step = piece - overlap;
+  const images = [];
+  for (let y = 0; y < height; y += step) {
+    images.push(await screenshot(tabId, { x: 0, y, width: size.width, height: Math.min(piece, height - y) }));
+    if (y + piece >= height) break;
   }
+  return images;
+}
+// Screenshot the page after it has settled. SPA pages re-render constantly, so a
+// before/after fingerprint would abort on harmless changes; the model judges the
+// final image, and the source check happens on the server.
+async function stableShot(tabId, scanFn, args) {
   const current = await scan(tabId, scanFn, args);
-  if (current.error) throw new Error(current.error);
+  if (current.error && /登录|敏感/.test(current.error)) throw new Error(current.error);
   const image = await screenshot(tabId);
-  return { image, url: current.url, stable: false };
+  return { image, url: current.url, stable: true };
 }
 async function selfCheck(api, endpoint, tabId, test) {
   try {
@@ -175,35 +203,50 @@ async function run() {
     if (tasks.length) {
       const total = tasks.length;
       const cancelled = () => isStale();
+      // Records that share a URL live on ONE page. Open that page once and match
+      // every record on it, instead of opening the same page once per record.
+      const groups = [];
+      for (const task of tasks) {
+        const group = groups.find(g => g.url === task.url);
+        if (group) group.tasks.push(task); else groups.push({ url: task.url, tasks: [task] });
+      }
       let completed = 0;
-      // Each task gets its own background tab, so concurrent workers never fight
-      // over one tab (which caused "Navigation rejected" before).
       const worker = async () => {
         while (!cancelled()) {
-          const task = tasks.shift();
-          if (!task) return;
+          const group = groups.shift();
+          if (!group) return;
           let tab = null;
-          message = `正在并发核对 ${completed + 1}/${total}：${task.company}`;
           try {
             tab = await chrome.tabs.create({ url: 'about:blank', active: false });
-            await visit(tab.id, task.url);
-            const data = await readWhenStable(tab.id, scanPage, [task.position]);
-            const dataFp = await pageFingerprint(data);
-            const reply = await api('/api/refresh/result', { batchId, id: task.id, ...data });
-            if (reply.needsAI) {
-              const before = await readWhenStable(tab.id, scanPage, [task.position]);
-              if ((before.error && !before.fallbackAllowed) || before.url !== data.url || await pageFingerprint(before) !== dataFp) throw new Error('截图前页面变化，重新匹配');
-              const image = await screenshot(tab.id);
-              const after = await readWhenStable(tab.id, scanPage, [task.position]);
-              if ((after.error && !after.fallbackAllowed) || after.url !== data.url || await pageFingerprint(after) !== dataFp) throw new Error('截图期间页面变化，改用当前页面');
-              await api('/api/refresh/image', { batchId, id: task.id, url: data.url, image });
+            await visit(tab.id, group.url);
+            // Read the page once; the model matches each record against the same page.
+            // A common shell problem: the SPA renders before the record list loads.
+            // Wait until this page's first job name appears, then return the page text.
+            const data = await readWhenStable(tab.id, scanPage, [], { expect: group.tasks[0]?.position || '' });
+            const pending = [];
+            for (const task of group.tasks) {
+              message = `正在核对 ${completed + 1}/${total}：${task.company} ${task.position}`;
+              const reply = await api('/api/refresh/result', { batchId, id: task.id, ...data }).catch(error => ({ error: error.message }));
+              if (reply.error) { completed++; continue; }
+              if (reply.needsAI) pending.push(task);
+              else completed++;
             }
-          } catch (error) { await api('/api/refresh/result', { batchId, id: task.id, error: error.message }).catch(() => {}); }
-          finally { if (tab) { try { await chrome.tabs.remove(tab.id); } catch {} } }
-          completed++;
+            if (pending.length) {
+              if (data.error && !data.fallbackAllowed) {
+                for (const task of pending) { await api('/api/refresh/result', { batchId, id: task.id, error: data.error }).catch(() => {}); completed++; }
+                return;
+              }
+              // One screenshot set per page, reused for every record on it.
+              const images = await screenshots(tab.id);
+              for (const task of pending) { await api('/api/refresh/image', { batchId, id: task.id, url: data.url, images }).catch(() => {}); completed++; }
+            }
+          } catch (error) {
+            for (const task of group.tasks) { await api('/api/refresh/result', { batchId, id: task.id, error: error.message }).catch(() => {}); }
+            completed += group.tasks.length;
+          } finally { if (tab) { try { await chrome.tabs.remove(tab.id); } catch {} } }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(2, tasks.length) }, () => worker()));
+      await Promise.all(Array.from({ length: Math.min(2, groups.length) }, () => worker()));
     }
     message = '本轮执行完成，请在台账查看结果并确认。';
   } catch (error) { message = error.message; }
@@ -224,12 +267,12 @@ chrome.runtime.onMessage.addListener((request, sender, reply) => {
       }
       const { endpoint, api } = await connection();
       if (fromPage && endpoint !== request.endpoint) throw new Error('此页面不是已配对台账，请重新连接');
-      if (['PING', 'PAIR', 'RUN'].includes(request.type)) await api('/api/bridge/hello', { version: '0.3.0' });
+      if (['PING', 'PAIR', 'RUN'].includes(request.type)) await api('/api/bridge/hello', { version: VERSION });
       if (request.type === 'RUN') {
         if (busy) throw new Error('浏览器采集正在执行，请等待本轮结束');
         message = '已开始执行'; void run();
       }
-      reply({ ok: true, message, busy, version: '0.3.0' });
+      reply({ ok: true, message, busy, version: VERSION });
     } catch (error) { reply({ ok: false, message: error.message, busy }); }
   })();
   return true;

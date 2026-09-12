@@ -5,7 +5,7 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-10.18';
+const UI_VERSION = '2026-09-12.23';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
@@ -14,8 +14,15 @@ async function api(path, body) {
   const result = await response.json(); if (!response.ok) throw new Error((result.error || '本地服务暂时不可用') + (result.requestId ? ` [${result.requestId}]` : '')); return result;
 }
 function options(id, values) { $(id).insertAdjacentHTML('beforeend', values.map(v => `<option>${esc(v)}</option>`).join('')); }
+// Each application stage gets its own colour, so stages are visually distinct.
+const STAGE_CLASS = { 简历筛选中: "s-screening", 笔试: "s-written", 面试: "s-interview", Offer: "s-offer", 已结束: "s-ended", 已撤回: "s-withdrawn" };
 const calendarUI = setupCalendar({ getState: () => state, notify: toast, save: async event => { state = await api('/api/events', { event, baseRevision: state.revision, confirmed: !!event.id }); render(); } });
 for (const [id, values] of [['directionFilter', DIRECTIONS], ['stageFilter', STAGES], ['screenFilter', SCREENINGS], ['formDirection', DIRECTIONS], ['formStage', STAGES], ['formScreening', SCREENINGS], ['formRank', RANKS]]) options(id, values);
+// Put the stage colour on the filter itself so the chosen stage is easy to recognise.
+$('stageFilter').classList.add('stage-select');
+function syncStageFilterColor() { const value = $('stageFilter').value; $('stageFilter').className = `stage-select${value ? ` ${STAGE_CLASS[value] || ''}` : ''}`; }
+$('stageFilter').addEventListener('change', syncStageFilterColor);
+syncStageFilterColor();
 $('formRank').insertAdjacentHTML('afterbegin', '<option value="">未标注</option>');
 $('seasonYear').textContent = new Date().getFullYear();
 $('sortDir').dataset.dir = 'desc';
@@ -46,45 +53,39 @@ function filtered() {
   const matched = state.records.filter(r => (!query || [r.company, r.position, r.resumeVersion].join(' ').toLowerCase().includes(query)) && (!$('directionFilter').value || r.direction === $('directionFilter').value) && (!$('stageFilter').value || r.stage === $('stageFilter').value) && (!$('screenFilter').value || r.screening === $('screenFilter').value) && (view !== 'interview' || ['笔试', '面试'].includes(r.stage)));
   return sortRecords(matched);
 }
-function badge(value, stage = false) { const type = value === '通过' ? 'pass' : value === '未通过' ? 'fail' : value === '待反馈' ? 'pending' : value === 'Offer' ? 'offer' : stage && !['已结束', '已撤回'].includes(value) ? 'stage' : ''; return `<span class="badge ${type}">${esc(value)}</span>`; }
-// Keep only the meaningful status phrase from raw page text, dropping repeated
-// job titles, counts and dates so the cell stays short.
+function badge(value, stage = false) {
+  const type = value === '通过' ? 'pass' : value === '未通过' ? 'fail' : value === '待反馈' ? 'pending' : stage ? (STAGE_CLASS[value] || '') : '';
+  return `<span class="badge ${type}">${esc(value)}</span>`;
+}
+// Show the page's own status line as-is (trimmed), instead of reconstructing one.
 function rawStatusLine(raw) {
   if (!raw) return '';
   const cleaned = String(raw).replace(/[“”"'「」『』]/g, '').replace(/^\s*[（(]\d+[)）]\s*/, '');
   const parts = cleaned.split(/[；;\n、·|]+/).map(s => s.trim()).filter(Boolean);
   const labelled = parts.map(s => s.match(/(?:当前状态|最新状态|当前进度|进度|状态|阶段)\s*[：:]\s*(.+)$/)).find(Boolean);
-  if (labelled) return labelled[1].trim().slice(0, 24);
+  if (labelled) return labelled[1].trim().slice(0, 40);
   const inline = cleaned.match(/(?:当前状态|最新状态|当前进度|进度|状态|阶段)\s*[：:]\s*([^\s，。;；、]+)/);
-  if (inline) return inline[1].trim().slice(0, 24);
-  const keyword = parts.find(s => /^[\u4e00-\u9fa5A-Za-z0-9-]{1,20}$/.test(s) && /(筛选|初筛|笔试|测评|面试|一面|二面|终面|录用|Offer|流程结束|已结束|待处理|未处理|已完成|待反馈|待面试|待笔试)/.test(s));
-  return keyword ? keyword.slice(0, 24) : '';
+  if (inline) return inline[1].trim().slice(0, 40);
+  return '';
 }
-// Pull just the qualifier after a step word, e.g. "笔试-未处理" -> "未处理".
-function stageQualifier(raw, stage) {
-  if (!raw || !stage || !raw.includes(stage)) return '';
-  return raw.slice(raw.indexOf(stage) + stage.length).replace(/^[-–—·\s:：]+/, '').replace(/[（(].*$/, '').trim().slice(0, 12);
-}
-// A clean status: one badge plus at most one short line. Never repeats itself.
+// Colour is decided by the stage alone, so the same stage always looks the same.
+// The page's own status text is only an extra note, never a colour input.
 function statusCell(r) {
-  const raw = rawStatusLine(r.rawStatus);
   if (r.screening === '未通过') return { badge: badge('简历未通过'), note: '' };
-  // The stage itself already means "简历筛选中", so don't repeat it as a note.
-  if (r.stage === '简历筛选中') return { badge: badge('简历筛选中'), note: r.screening === '通过' ? '简历通过' : '' };
-  if (r.screening === '通过' && r.stage !== 'Offer') return { badge: badge(r.stage, true), note: '简历通过' };
-  const qualifier = stageQualifier(raw, r.stage);
-  return { badge: badge(r.stage, true), note: qualifier && qualifier !== r.stage ? qualifier : '' };
+  const raw = rawStatusLine(r.rawStatus);
+  if (r.stage === '简历筛选中') return { badge: badge('简历筛选中', true), note: raw || (r.screening === '通过' ? '简历通过' : '') };
+  if (r.screening === '通过' && r.stage !== 'Offer') return { badge: badge(r.stage, true), note: raw || '简历通过' };
+  return { badge: badge(r.stage, true), note: raw };
 }
 function rankLabel(rank) { return rank ? `<span class="rank-tag">${esc(rank)}</span>` : ''; }
 function rankValue(rank) { const m = /^第(\d+)志愿$/.exec(rank || ''); return rank === '人才计划' ? 0 : m ? Number(m[1]) : 99; }
 function companyGroups(records) {
   const map = new Map();
   for (const r of records) { if (!map.has(r.company)) map.set(r.company, []); map.get(r.company).push(r); }
-  // Order preferences inside each company: rank number, then date.
-  for (const items of map.values()) items.sort((a, b) => rankValue(a.rank) - rankValue(b.rank) || (a.applyTime || '').localeCompare(b.applyTime || ''));
-  const groups = [...map.entries()];
-  groups.sort(([, a], [, b]) => a[0].company.localeCompare(b[0].company, 'zh-CN'));
-  return groups;
+  // Records already arrive globally sorted. Grouping must NOT reorder them, or the
+  // chosen sort field and direction would be silently ignored. Companies appear in
+  // the order of their top record, and preferences keep the sorted order inside.
+  return [...map.entries()];
 }
 // Split the filtered list into stage sections (面试中 / 一面 / 笔试 ...) in a fixed
 // order, so interview and test items are easy to spot without opening filters.
@@ -170,18 +171,28 @@ $('sortDir').onclick = () => {
   $('sortDirLabel').textContent = next === 'asc' ? '升序' : '降序';
   render();
 };
-$('resetFilters').onclick = () => { for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter']) $(id).value = ''; render(); };
+$('resetFilters').onclick = () => { for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter']) $(id).value = ''; syncStageFilterColor(); render(); };
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).close());
 document.addEventListener('click', event => { const button = event.target.closest('[data-edit]'); if (button) openRecord(button.dataset.edit); const check = event.target.closest('[data-check]'); if (check) checkOne(check.dataset.check); const appointment = event.target.closest('[data-event]'); if (appointment) calendarUI.openEvent(appointment.dataset.event); const remove = event.target.closest('[data-delete]'); if (remove) deleteRecord(remove.dataset.delete); });
 async function checkOne(id) {
   try {
     const connection = await browserBridge('PING'); if (connection.busy) throw new Error('浏览器已有任务执行中，请稍后再试');
-    const result = await api('/api/refresh/start', { baseRevision: state.revision, ids: [id] }); batch = result.batch; await browserBridge('RUN'); toast('已在后台核对该志愿');
+    // Records that share one page should update together: check the whole page.
+    const target = state.records.find(r => r.id === id);
+    const ids = target?.url ? state.records.filter(r => r.url && r.url === target.url).map(r => r.id) : [id];
+    const result = await api('/api/refresh/start', { baseRevision: state.revision, ids }); batch = result.batch; await browserBridge('RUN'); toast(ids.length > 1 ? `已核对这一页的 ${ids.length} 个志愿` : '已在后台核对该志愿');
     const watch = setInterval(async () => {
       try {
         const { batch: latest } = await api('/api/refresh'); batch = latest;
         const running = (latest?.tasks || []).some(t => ['queued', 'needs-image', 'ai-running'].includes(t.status));
-        if (!running) { clearInterval(watch); state = await api('/api/state'); render(); const task = latest?.tasks?.[0]; toast(task?.status === 'failed' ? `核对未完成：${task.message}` : '核对已完成，时间已更新'); }
+        if (!running) {
+          clearInterval(watch);
+          const good = (latest?.tasks || []).filter(t => ['changed', 'unchanged'].includes(t.status));
+          if (good.length) state = await api('/api/refresh/apply', { batchId: latest.id, confirmed: true }); else state = await api('/api/state');
+          render();
+          const failed = (latest?.tasks || []).filter(t => t.status === 'failed');
+          toast(failed.length ? `已更新 ${good.length} 条，${failed.length} 条未完成：${failed[0].message}` : `已更新 ${good.length} 条的步骤和核对时间`);
+        }
       } catch { clearInterval(watch); }
     }, 2500);
   } catch (error) { toast(error.message); }
@@ -235,7 +246,13 @@ $('batchApply').onclick = async () => { $('batchApply').disabled = true; try { s
 async function diagnostics() {
   try {
     const result = await api('/api/diagnostics');
-    $('diagnosticsOutput').textContent = [`服务版本：${result.version}；浏览器：${result.bridge.connected ? '已连接' : '未连接'}`, result.selfTest ? `自检：${result.selfTest.message}` : '', ...result.events.slice(-25).map(item => `${item.at} ${item.method || item.event || ''} ${item.route || ''} ${item.status || ''} ${item.requestId || ''} ${item.durationMs === undefined ? '' : item.durationMs + 'ms'}`)].filter(Boolean).join('\n');
+    $('diagnosticsOutput').textContent = [`服务版本：${result.version}；浏览器：${result.bridge.connected ? '已连接' : '未连接'}${result.bridge.version ? `（扩展 ${result.bridge.version}）` : ''}`, result.selfTest ? `自检：${result.selfTest.message}` : '', ...result.events.slice(-25).map(item => {
+      const time = new Date(item.at).toLocaleTimeString('zh-CN', { hour12: false });
+      if (item.event === 'refresh.read') return `${time} 核对读取：${item.company || ''} 文本${item.textLength ?? '?'}字 范围${item.scope || '?'}${item.loginish ? ' 疑似登录页' : ''}${item.matches ? '' : ' 未含进度关键词'}`;
+      if (item.event?.startsWith('refresh.image')) return `${time} 截图核对：${item.reason || '完成'}`;
+      if (item.event) return `${time} ${item.event}${item.company ? ` · ${item.company}` : ''}${item.reason ? ` · ${item.reason}` : ''}`;
+      return `${time} ${item.method || ''} ${item.route || ''} ${item.status || ''} ${item.durationMs === undefined ? '' : item.durationMs + 'ms'}`;
+    }).filter(Boolean)].join('\n');
     if (result.selfTest?.status === 'passed') { state = await api('/api/state'); $('aiState').textContent = '规则失败自动 AI 兜底'; $('pairNotice').textContent = result.selfTest.message; clearInterval(diagnosticPolling); }
     if (result.selfTest?.status === 'failed') { $('pairNotice').textContent = result.selfTest.message; clearInterval(diagnosticPolling); }
   } catch (error) { $('diagnosticsOutput').textContent = error.message; }
