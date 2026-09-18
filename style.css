@@ -1,9 +1,24 @@
 :root{font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#22282c;background:#fff;font-size:14px;letter-spacing:0;--muted:#748080;--border:#e6eae8;--green:#16705d;--blue:#437bd0;--red:#c56764}
 .diagnostics-output{white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.7 ui-monospace,monospace;max-height:260px;overflow:auto;background:#f5f7f5;padding:12px;border-radius:5px}.model-presets{display:flex;flex-wrap:wrap;gap:7px;align-items:center;font-size:12px;color:#7c8a80;margin:2px 0 16px}.preset-chip{border:1px solid #d7e2da;background:#f4f8f5;color:#39634d;border-radius:14px;padding:4px 11px;font-size:12px;cursor:pointer}.preset-chip:hover{background:#e6f0e9}.page-preview{min-width:870px}.page-preview input:not([type=checkbox]),.page-preview select{width:100%;min-width:110px;padding:7px;font-size:12px}.page-preview td{padding:10px 6px;max-width:250px}.page-preview td:first-child{min-width:45px}.page-preview td:nth-child(3){min-width:210px}.page-preview .cell-secondary{white-space:normal}#pageProgress{padding:8px 0;font-weight:500}.setting-row code{max-width:70%}
 .topbar-date{margin-left:auto}.wide-dialog{width:min(1050px,calc(100vw - 32px))}.batch-table{margin-top:18px}.batch-table td{white-space:normal;min-width:130px;max-width:260px}.batch-table .cell-secondary{white-space:normal;overflow-wrap:anywhere}.batch-table td:first-child{min-width:180px}.records-table td:nth-child(4){white-space:normal;min-width:150px}.history strong{color:#496f5d}
-+.rank-tag{display:inline-block;background:#eaf1fb;color:#4a6fa5;border-radius:4px;font-size:11px;padding:2px 7px;margin-right:8px;flex-shrink:0}.company-count{font-size:11px;color:#94a096;font-weight:400;margin-left:9px}.records-table tr.group-start td{border-top:2px solid #dfe7e1}.records-table tr.group-row td{border-top:1px dashed #eef2ef}.records-table td:first-child .position-name{padding-left:36px}.icon-button.danger:hover{background:#fdecea;color:#b9574f}.page-preview .rank-tag{margin-right:0}
+.rank-tag{display:inline-block;background:#eaf1fb;color:#4a6fa5;border-radius:4px;font-size:11px;padding:2px 7px;margin-right:8px;flex-shrink:0}.company-count{font-size:11px;color:#94a096;font-weight:400;margin-left:9px}.records-table tr.group-start td{border-top:2px solid #dfe7e1}.records-table tr.group-row td{border-top:1px dashed #eef2ef}.records-table td:first-child .position-name{padding-left:36px}.icon-button.danger:hover{background:#fdecea;color:#b9574f}.page-preview .rank-tag{margin-right:0}
 /* Card list */
 .record-list{display:flex;flex-direction:column;gap:14px;padding-top:4px}
+/* Grid: several companies per row so long lists need less scrolling. */
+.record-list.grid-view{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:14px;align-items:start;padding-top:4px}
+.record-list.grid-view .stage-title{grid-column:1/-1}
+.record-list.grid-view .stage-section{display:grid;grid-template-columns:repeat(auto-fill,minmax(430px,1fr));gap:14px;margin-bottom:0}
+.record-list.grid-view .stage-section>.stage-title{grid-column:1/-1}
+.record-list.grid-view .company-card{height:100%}
+.record-list.grid-view .pref-row{grid-template-columns:minmax(0,1fr) 42px;grid-template-areas:"main actions" "status actions" "meta meta";gap:10px 12px;align-items:start;padding:13px 15px}
+.record-list.grid-view .pref-main{grid-area:main}
+.record-list.grid-view .pref-status{grid-area:status;flex-direction:row;flex-wrap:wrap;align-items:center;gap:8px}
+.record-list.grid-view .pref-meta{grid-area:meta;justify-content:space-between;margin-top:2px}
+.record-list.grid-view .row-actions{grid-area:actions;flex-direction:column;justify-content:flex-start}
+.record-list.grid-view .company-card-head{padding:13px 15px}
+.record-list.grid-view .company-card-head h3{font-size:15px}
+.record-list.grid-view .pref-position{font-size:14px}
+.record-list.grid-view .stage-section>.company-card+.company-card{margin-top:0}
 .stage-section{display:flex;flex-direction:column;gap:12px;margin-bottom:26px}
 .stage-title{display:flex;align-items:center;gap:9px;font-size:15px;font-weight:650;color:#2c4738;padding:6px 2px 2px;border-bottom:2px solid #e2ebe5}
 .stage-title .stage-count{background:#e7f0ea;color:#2f7256;border-radius:11px;font-size:12px;font-weight:600;padding:1px 9px;min-width:22px;text-align:center}
@@ -21,9 +36,10 @@
 .company-link:hover{text-decoration:none;background:#dcece2;border-color:#c3ddcd}
 .company-link svg{width:14px;height:14px}
 .pref-list{list-style:none;margin:0;padding:0}
-.pref-row{display:grid;grid-template-columns:minmax(0,1fr) 120px 108px 88px 76px;align-items:center;gap:18px;padding:16px 18px;border-top:1px solid #f0f4f1}
+.pref-row{display:grid;grid-template-columns:minmax(0,1fr) 120px 130px minmax(96px,auto);align-items:center;gap:18px;padding:16px 18px;border-top:1px solid #f0f4f1}
 .pref-row:first-child{border-top:0}
 .pref-row:hover{background:#fbfdfc}
+.pref-meta{display:flex;align-items:center;justify-content:flex-end;gap:16px;min-width:0}
 .pref-main{display:flex;align-items:flex-start;gap:10px;min-width:0}
 .pref-title{display:flex;flex-direction:column;gap:6px;min-width:0}
 .pref-position{font-size:14.5px;color:#232a31;font-weight:600;overflow-wrap:anywhere;line-height:1.5}
@@ -35,8 +51,8 @@
 .pref-date{font-size:13.5px;color:#3f4a43;font-weight:550;font-variant-numeric:tabular-nums;white-space:nowrap}
 .pref-checked{font-size:12px;color:#9aa49e;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 .pref-row .row-actions{justify-content:flex-end}
-.company-initial{width:34px;height:34px;background:#e8f2ec;color:#2f7a5b;display:grid;place-items:center;border-radius:8px;font-size:15px;font-weight:600;flex-shrink:0}
-@media(max-width:900px){.pref-row{grid-template-columns:1fr;gap:10px;align-items:flex-start}.pref-status{align-items:flex-start}.pref-checked{text-align:left}.pref-row .row-actions{justify-content:flex-start}.company-card-head{flex-wrap:wrap}}
+@media(max-width:900px){.pref-row{grid-template-columns:1fr;gap:10px;align-items:flex-start}.pref-status{align-items:flex-start}.pref-meta{justify-content:flex-start}.pref-row .row-actions{justify-content:flex-start}.company-card-head{flex-wrap:wrap}}
+.record-list .list-head{display:none}
 .calendar-toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;padding:8px 0 16px}
 .calendar-navigation,.calendar-controls{display:flex;align-items:center;gap:9px;min-width:0}
 .calendar-navigation h2{font-size:18px;text-align:center;min-width:160px}

@@ -13,6 +13,18 @@ export function classifyDirection(text) {
   return '其他';
 }
 export const RANKS = ['第1志愿', '第2志愿', '第3志愿', '第4志愿', '人才计划', '其他'];
+// A page (or model) often carries a stale year for the current campus season. When
+// the exact month-day is this year's already-passed date, treat it as this year.
+export function normalizeApplyTime(value, today = new Date()) {
+  const date = String(value || '').trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(date)) || new Date(date).toISOString().slice(0, 10) !== date) return '';
+  const year = Number(date.slice(0, 4));
+  const current = today.getFullYear();
+  const sameMonthDayThisYear = `${current}${date.slice(4)}`;
+  // The fallback day must be the recognition day itself.
+  if (year < current && sameMonthDayThisYear <= today.toLocaleDateString('en-CA')) return sameMonthDayThisYear;
+  return date;
+}
 export const FIELDS = ['id', 'company', 'rank', 'program', 'position', 'direction', 'location', 'applyTime', 'stage', 'screening', 'resumeVersion', 'source', 'url', 'nextAction', 'nextDate', 'notes', 'rawStatus', 'lastCheckedAt', 'sourceUid'];
 export const CAPTURE_HOSTS = [''];
 

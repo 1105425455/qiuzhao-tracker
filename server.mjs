@@ -4,13 +4,13 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { FIELDS, normalize, CAPTURE_HOSTS, progressCandidate, classifyDirection, scopeToPosition } from './model.mjs';
+import { FIELDS, normalize, CAPTURE_HOSTS, progressCandidate, classifyDirection, scopeToPosition, normalizeApplyTime } from './model.mjs';
 import { MODEL_CATALOG, apiForModel } from './models.mjs';
-import { analyze, recognizeImage, recognizeText, extractApplications } from './ai.mjs';
+import { analyze, extractEvent, recognizeImage, recognizeText, extractApplications, parseLooseJson } from './ai.mjs';
 import { normalizeEvent, legacyEventKey } from './calendar.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
-const EXTENSION_VERSION = '0.4.0';
+export const EXTENSION_VERSION = '0.4.28';
 const Papa = createRequire(import.meta.url)('./vendor/papaparse.js');
 const files = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']],
@@ -164,6 +164,9 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
   }
   let batch = null;
   let pageJob = null;
+  // Screenshots stay in memory only for debugging the current recognition. They
+  // are never written to the ledger, disk, or diagnostics log.
+  const pageDebug = () => pageJob?.debugCapture || null;
   let bridge = { lastSeen: 0, version: '' };
   let selfTest = null;
   // Last successful check time per record id. Kept in a side file so showing a
@@ -186,7 +189,11 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
   }
   function pageResult() {
     if (!pageJob) return { job: null };
-    if (['queued', 'analyzing', 'needs-images'].includes(pageJob.status) && Date.now() - Date.parse(pageJob.at) > 5 * 60 * 1000) { pageJob.status = 'failed'; pageJob.message = '本次解析超时，请重试；未写入任何记录'; }
+    // AI image extraction alone may take up to 180s, and the capture adds scrolling.
+    // Only treat a job as timed out after a generous window, measured from the last
+    // state change rather than from the initial request.
+    const last = Date.parse(pageJob.updatedAt || pageJob.at);
+    if (['queued', 'analyzing', 'needs-images'].includes(pageJob.status) && Date.now() - last > 10 * 60 * 1000) { pageJob.status = 'failed'; pageJob.message = '本次解析超时，请重试；未写入任何记录'; }
     const { cards, ...visible } = pageJob;
     return { job: visible };
   }
@@ -210,7 +217,10 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
     if (age > 60 * 60 * 1000) for (const task of batch.tasks) if (['queued', 'needs-image', 'ai-running'].includes(task.status)) { task.status = 'failed'; task.message = '本轮核对超时，请重新发起'; }
     // A browser tab can hang on a single page (network or debugger). Fail only the
     // task that stopped making progress so the rest of the batch can finish.
-    for (const task of batch.tasks) if (['needs-image', 'ai-running'].includes(task.status) && Date.now() - Date.parse(task.checkedStart || task.at || batch.at) > 3 * 60 * 1000) { task.status = 'failed'; task.message = '该记录长时间没有结果，已跳过；原记录保留'; }
+    // Six minutes, not three: a screenshot round trip allows 180s for the model plus
+    // capture and upload time, so a three-minute cutoff killed tasks that were
+    // still working and reported them as "长时间没有结果".
+    for (const task of batch.tasks) if (['needs-image', 'ai-running'].includes(task.status) && Date.now() - Date.parse(task.checkedStart || task.at || batch.at) > 6 * 60 * 1000) { task.status = 'failed'; task.message = '该记录长时间没有结果，已跳过；原记录保留'; }
     return { batch };
   };
   function save(records, events = state.events) {
@@ -262,7 +272,12 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (url.pathname === '/api/health') return send(200, { ok: true, version: 4 });
         if (url.pathname === '/api/diagnostics') return send(200, { version: 4, bridge: { connected: Date.now() - bridge.lastSeen < 15000, version: bridge.version, lastSeen: bridge.lastSeen }, aiEnabled: provider().enabled === true, selfTest, events: diagnostics });
         if (url.pathname === '/api/ai/settings') return send(200, settingsView());
-        if (url.pathname === '/api/pages') return send(200, pageResult());
+         if (url.pathname === '/api/pages') return send(200, pageResult());
+         if (url.pathname === '/api/pages/debug') {
+           const capture = pageDebug();
+           if (capture && url.searchParams.get('image') === '1') return send(200, capture.images[0] || '', 'image/png');
+           return send(200, capture ? { ...capture, images: capture.images.map(image => ({ length: image.length, prefix: image.slice(0, 30) })) } : { capture: null });
+         }
         if (url.pathname === '/api/refresh') return send(200, batchResult());
         if (url.pathname === '/api/refresh/tasks') {
           batchResult();
@@ -325,7 +340,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         normalize({ company: '网址校验', position: '网址校验', url: body.url });
         if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password || /(?:token|password|secret|authorization)=/i.test(`${source.search}${source.hash}`)) throw new Error('请填写正常招聘投递页网址，且网址本身不含登录凭证');
         if (typeof body.company !== 'string' || body.company.length > 200) throw new Error('公司名称格式不正确');
-        pageJob = { id: randomUUID(), url: source.href, company: body.company.trim(), at: new Date().toISOString(), baseRevision: state.revision, status: 'queued', message: '准备读取已登录的投递列表', rows: [], warnings: [] };
+        pageJob = { id: randomUUID(), url: source.href, company: body.company.trim(), at: new Date().toISOString(), updatedAt: new Date().toISOString(), baseRevision: state.revision, status: 'queued', message: '准备读取已登录的投递列表', rows: [], warnings: [] };
         return send(200, pageResult());
       }
       if (url.pathname === '/api/pages/result') {
@@ -337,26 +352,37 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (!samePage(source, expected)) return fail(`页面来源改变或需要登录（当前：${source.origin}${source.pathname}）`);
         if (looksLikeLogin(source)) return fail('页面跳到了登录页，请先在该网站登录后重试');
         if (!Array.isArray(body.cards) || !body.cards.length || body.cards.length > 20) return fail('未读取到投递卡片');
-        const cards = body.cards.map(card => ({ text: card.text, position: typeof card.position === 'string' ? card.position.slice(0, 200) : '', uid: card.uid || '', group: card.group === true }));
-        if (cards.some(card => typeof card.text !== 'string' || card.text.length > 3500 || /验证码|密码|身份证|access_token|authorization|1[3-9]\d{9}/i.test(card.text) || typeof card.uid !== 'string' || (card.uid && !/^[\w.:-]{1,200}$/.test(card.uid)))) return fail('卡片内容过大或含敏感信息，不发送给 AI');
-        job.status = 'analyzing'; job.message = `规则正在识别 ${cards.length} 个投递区域`;
-        job.cards = cards; job.title = typeof body.title === 'string' ? body.title.slice(0, 200) : ''; job.more = body.more === true; job.skipped = Number.isInteger(body.skipped) ? body.skipped : 0;
-        job.pageText = typeof body.pageText === 'string' ? body.pageText.slice(0, 3500) : cards.map(card => card.text).join('\n').slice(0, 3500);
+        const cards = body.cards.map(card => ({ text: card.text, position: typeof card.position === 'string' ? card.position.slice(0, 200) : '', uid: card.uid || '', group: card.group === true, needsImage: card.needsImage === true }));
+        if (cards.some(card => typeof card.text !== 'string' || card.text.length > 12000 || /验证码|密码|身份证|access_token|authorization|1[3-9]\d{9}/i.test(card.text) || typeof card.uid !== 'string' || (card.uid && !/^[\w.:-]{1,200}$/.test(card.uid)))) return fail('卡片内容过大或含敏感信息，不发送给 AI');
+        if (!provider().enabled) return fail('AI 未启用，投递页识别需要启用 AI');
+         job.status = 'analyzing'; job.updatedAt = new Date().toISOString(); job.message = '页面文字已读取，正在交给 AI 识别';
+         job.cards = cards; job.positionHints = cards.map(card => card.position).filter(Boolean); job.title = typeof body.title === 'string' ? body.title.slice(0, 200) : ''; job.more = body.more === true; job.singlePage = body.singlePage === true; job.skipped = Number.isInteger(body.skipped) ? body.skipped : 0;
+        job.pageText = typeof body.pageText === 'string' ? body.pageText.slice(0, 12000) : cards.map(card => card.text).join('\n').slice(0, 12000);
         if (/验证码|密码|身份证|access_token|authorization/i.test(job.pageText)) return fail('页面有登录或敏感信息，不外发');
-        const ruleRows = [];
-        for (const [index, card] of cards.entries()) {
-          const parsed = progressCandidate(card.text);
-          if (card.group || !job.company || !card.position || !card.text.includes(card.position) || parsed.ambiguous || !Object.keys(parsed.candidate).length) continue;
-          const date = card.text.match(/(?:投递|申请|应聘)时间\s*[：:]?\s*(\d{4}-\d{2}-\d{2})/)?.[1] || new Date().toLocaleDateString('en-CA');
-          try {
-            const record = normalize({ company: job.company, position: card.position, applyTime: date, stage: parsed.candidate.stage || '简历筛选中', screening: parsed.candidate.screening || '待反馈', url: job.url, rawStatus: parsed.evidence, source: '官网列表规则', sourceUid: card.uid, direction: classifyDirection(card.position) });
-            ruleRows.push({ index, record });
-          } catch { /* Ambiguous or inconsistent records are reviewed with the whole-page image. */ }
-        }
-        job.rows = planRows(ruleRows, job.url);
-        const needsImage = ruleRows.length !== cards.length;
-        job.status = needsImage ? 'needs-images' : 'ready'; job.message = needsImage ? '规则无法完整确认，自动发送 800px 整页截图给 AI' : `规则识别 ${job.rows.length} 条投递，等待确认`;
-        return send(200, { ok: true, needsImage });
+          job.rows = [];
+          // Do not use a character-count threshold to decide whether text is useful.
+          // A short SPA shell may still contain the complete application, and the
+          // model is the right component to decide whether the text is sufficient.
+          // One exception: when the readable text is nothing but site chrome (nav
+          // links and a masked phone number), the model cannot possibly name a
+          // position. Asking it anyway burns a full round-trip (~15s) before the
+          // screenshot path, so go straight to images in that case.
+          const chromeOnly = job.pageText.replace(/\s+/g, '').length <= 60 && !/投递|应聘|申请|志愿|面试|笔试|测评|Offer|简历|状态|流程/i.test(job.pageText);
+          if (chromeOnly) log({ event: 'page.text.skipped', requestId, textLen: job.pageText.length, reason: '页面文字只有导航，直接截图' });
+          else if (job.pageText.trim()) {
+            try {
+              const parsed = await extractApplications(provider(), { ...job, recordPage: true, singlePage: job.singlePage === true, cards: [{ text: `${job.positionHints?.join('\n') || ''}\n${job.pageText}`, group: true }] }, fetchAI);
+              log({ event: 'page.text', requestId, rows: parsed.rows.length, warnings: (parsed.warnings || []).slice(0, 3), textLen: job.pageText.length, reply: parsed.debug?.reply });
+              if (parsed.rows.length) {
+                job.rows = planRows(parsed.rows, job.url); job.status = 'ready'; job.updatedAt = new Date().toISOString(); job.message = `AI 文字识别 ${job.rows.length} 条投递，等待确认`;
+                return send(200, { ok: true, needsImage: false });
+              }
+              // Save debug info even when text AI returns 0 rows
+              job.debugCapture = { images: [], textLen: job.pageText.length, photos: 0, reply: parsed.debug?.reply || '', rows: 0, at: new Date().toISOString() };
+            } catch (error) { log({ event: 'page.text.failed', requestId, reason: error?.message, textLen: job.pageText.length }); }
+          }
+          job.status = 'needs-images'; job.updatedAt = new Date().toISOString(); job.message = '正在按页面截图复核';
+          return send(200, { ok: true, needsImage: true });
       }
       if (url.pathname === '/api/pages/images') {
         const job = pageJob;
@@ -364,15 +390,17 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         if (body.error) { job.status = 'ready'; job.message = '截图复核未完成，仅保留已确认的文字候选'; job.warnings.push(String(body.error).slice(0, 300)); return send(200, { ok: true }); }
         const source = new URL(body.url), expected = new URL(job.url);
         if (!samePage(source, expected) || looksLikeLogin(source)) throw new Error('截图来源改变或为登录页');
-        job.status = 'analyzing';
+        job.status = 'analyzing'; job.updatedAt = new Date().toISOString();
         try {
-          const parsed = await extractApplications(provider(), { ...job, recordPage: true, cards: [{ text: job.pageText, image: body.image, group: true }] }, fetchAI);
+           const parsed = await extractApplications(provider(), { ...job, recordPage: true, singlePage: job.singlePage === true, cards: [{ text: `${job.positionHints?.join('\n') || ''}\n${job.pageText}`, image: (body.images && body.images[0]) || body.image, images: body.images || (body.image ? [body.image] : []), group: true }] }, fetchAI);
           if (pageJob !== job || job.status !== 'analyzing') return send(409, { error: '任务已结束' });
+          job.debugCapture = { images: body.images || (body.image ? [body.image] : []), textLen: job.pageText.length, photos: parsed.debug?.photos || 0, reply: parsed.debug?.reply || '', rows: parsed.rows.length, at: new Date().toISOString() };
+          log({ event: 'page.image', requestId, rows: parsed.rows.length, warnings: (parsed.warnings || []).slice(0, 3), textLen: job.pageText.length, photos: parsed.debug?.photos, reply: parsed.debug?.reply });
           if (parsed.rows.length) job.rows = planRows(parsed.rows, job.url);
           job.warnings = parsed.warnings && parsed.warnings.length ? parsed.warnings : job.warnings;
-          if (!parsed.rows.length) job.warnings.push('整页截图未能识别出岗位，仅保留已有规则候选');
-        } catch (error) { job.warnings.push(`整页截图识别失败：${error && error.message ? error.message : '未知原因'}；未修改台账`); log({ event: 'page.image.failed', requestId, reason: error && error.message }); }
-        job.status = 'ready'; job.message = `已识别 ${job.rows.length} 条投递，等待确认`;
+          if (!parsed.rows.length) job.warnings.push(`AI 未返回岗位候选（页面文字 ${job.pageText.length} 字，截图 ${parsed.debug?.photos || 0} 张）；可访问 http://127.0.0.1:${port}/api/pages/debug 查看原始 AI 回复`);
+        } catch (error) { const reason = error && error.message ? error.message : '未知原因'; job.warnings.push(`${/超时|TimeoutError/.test(reason) ? 'AI 请求超时' : 'AI 截图识别失败'}：${reason}；未修改台账`); log({ event: 'page.image.failed', requestId, reason, photos: Array.isArray(body.images) ? body.images.length : (body.image ? 1 : 0) }); }
+        job.status = 'ready'; job.updatedAt = new Date().toISOString(); job.message = `已识别 ${job.rows.length} 条投递，等待确认`;
         return send(200, { ok: true });
       }
       if (url.pathname === '/api/pages/reset') {
@@ -542,7 +570,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         const successful = new Map(batch.tasks.filter(t => ['changed', 'unchanged'].includes(t.status)).map(t => [t.id, t]));
         if (!successful.size) throw new Error('没有可更新的核对结果，原记录未改变');
         const records = state.records.map(r => { const t = successful.get(r.id); return t ? stamp({ ...r, ...t.candidate, rawStatus: t.evidence, lastCheckedAt: t.checkedAt }, r, t.status === 'changed' ? '批量核对：确认步骤变化' : '批量核对：步骤无变化') : r; });
-        const saved = save(records); batch.applied = true;
+        const saved = save(records); batch = null;
         return send(200, saved);
       }
       if (url.pathname === '/api/model') {
@@ -557,6 +585,14 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
       if (url.pathname === '/api/ai/preview') {
         if (!provider().enabled) return send(403, { error: 'AI 未启用，模型接口验收待完成' });
         return send(200, await analyze(provider(), body, fetchAI));
+      }
+      if (url.pathname === '/api/ai/event') {
+        if (!provider().enabled || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 12000) throw new Error('请先启用 AI，并粘贴邀约原文（最多 12000 字）');
+        const reply = await analyze(provider(), { consent: true, text: `请从下面这段招聘邀约中提取日程。${body.text}` }, fetchAI);
+        const value = parseLooseJson(reply.text);
+        const event = Array.isArray(value?.events) ? value.events[0] : value;
+        if (!event || typeof event !== 'object') throw new Error('AI 未返回日程 JSON');
+        return send(200, { event: { title: event.title || '', recordId: event.recordId || '', kind: event.kind || '面试', date: event.date || '', allDay: event.allDay === true, startTime: event.startTime || '', endTime: event.endTime || '', location: event.location || '', notes: event.notes || '', status: event.status || '待进行' } });
       }
       if (url.pathname === '/api/import-preview') return send(200, importPreview(body.csv, state.records));
       if (url.pathname === '/api/import') {

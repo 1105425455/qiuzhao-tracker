@@ -5,8 +5,9 @@ import { browserBridge } from './bridge.mjs';
 const $ = id => document.getElementById(id);
 const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const today = new Date().toLocaleDateString('en-CA');
-const UI_VERSION = '2026-09-12.23';
+const UI_VERSION = '2026-09-12.25';
 let state = { records: [], events: [], revision: 0 }, view = 'all', csv = '', batch = null, toastTimer, polling = null, pageJob = null, pagePolling = null, pageRendered = '', diagnosticPolling = null, batchRunning = false;
+let layout = localStorage.getItem('tracker-layout') === 'grid' ? 'grid' : 'list';
 const icons = () => window.lucide?.createIcons();
 function toast(message) { $('toast').textContent = message; $('toast').hidden = false; clearTimeout(toastTimer); toastTimer = setTimeout(() => $('toast').hidden = true, 4500); }
 async function api(path, body) {
@@ -117,8 +118,10 @@ function recordCard(company, items) {
           <div class="pref-status">
             ${st.badge}${st.note ? `<span class="pref-note">${esc(st.note)}</span>` : ''}
           </div>
-          <div class="pref-date">${r.applyTime ? `<span class="date-value">${esc(r.applyTime)}</span>` : '<span class="muted">—</span>'}</div>
-          <div class="pref-checked" title="最近核对时间">${r.lastCheckedAt ? esc(new Date(r.lastCheckedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })) : '<span class="muted">未核对</span>'}</div>
+          <div class="pref-meta">
+            <div class="pref-date">${r.applyTime ? `<span class="date-value">${esc(r.applyTime)}</span>` : '<span class="muted">—</span>'}</div>
+            <div class="pref-checked" title="最近核对时间">${r.lastCheckedAt ? esc(new Date(r.lastCheckedAt).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })) : '<span class="muted">未核对</span>'}</div>
+          </div>
           <div class="row-actions">
             <button class="icon-button" data-check="${esc(r.id)}" title="核对该志愿" aria-label="核对 ${esc(company)} ${esc(r.position)}"><i data-lucide="refresh-cw"></i></button><button class="icon-button" data-edit="${esc(r.id)}" title="更新该志愿" aria-label="更新 ${esc(company)} ${esc(r.position)}"><i data-lucide="pencil"></i></button>
             <button class="icon-button danger" data-delete="${esc(r.id)}" title="删除该志愿" aria-label="删除 ${esc(company)} ${esc(r.position)}"><i data-lucide="trash-2"></i></button>
@@ -130,6 +133,7 @@ function recordCard(company, items) {
 function render() {
   const records = filtered();
   $('navCount').textContent = state.records.length; $('filteredCount').textContent = records.length; $('tableCount').textContent = `${records.length} 条记录 · ${new Set(records.map(r => r.company)).size} 家公司`;   $('saveState').textContent = `本地已保存 · 版本 ${state.revision} · 界面 ${UI_VERSION}`;
+  $('recordRows').classList.toggle('grid-view', layout === 'grid');
   // Only section by stage when sorting BY stage; other sort fields apply globally.
   const byStage = $('sortOrder').value === 'stage';
   if (byStage) {
@@ -171,6 +175,18 @@ $('sortDir').onclick = () => {
   $('sortDirLabel').textContent = next === 'asc' ? '升序' : '降序';
   render();
 };
+function syncLayoutButton() {
+  const button = $('layoutToggle');
+  if (!button) return;
+  button.dataset.layout = layout;
+  const label = $('layoutLabel');
+  if (label) label.textContent = layout === 'grid' ? '网格' : '列表';
+}
+$('layoutToggle').onclick = () => { layout = layout === 'grid' ? 'list' : 'grid'; try { localStorage.setItem('tracker-layout', layout); } catch {} syncLayoutButton(); render(); };
+syncLayoutButton();
+// Surface any startup failure instead of leaving a silently dead page.
+window.addEventListener('error', event => { const box = $('loadError'); if (box && box.hidden) { box.hidden = false; box.textContent = `页面脚本出错：${event.message}。请强制刷新（Ctrl/Cmd+Shift+R）。`; } });
+window.addEventListener('unhandledrejection', event => { const box = $('loadError'); if (box && box.hidden) { box.hidden = false; box.textContent = `页面脚本出错：${event.reason && event.reason.message ? event.reason.message : event.reason}。请强制刷新（Ctrl/Cmd+Shift+R）。`; } });
 $('resetFilters').onclick = () => { for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter']) $(id).value = ''; syncStageFilterColor(); render(); };
 document.querySelectorAll('[data-close]').forEach(b => b.onclick = () => $(b.dataset.close).close());
 document.addEventListener('click', event => { const button = event.target.closest('[data-edit]'); if (button) openRecord(button.dataset.edit); const check = event.target.closest('[data-check]'); if (check) checkOne(check.dataset.check); const appointment = event.target.closest('[data-event]'); if (appointment) calendarUI.openEvent(appointment.dataset.event); const remove = event.target.closest('[data-delete]'); if (remove) deleteRecord(remove.dataset.delete); });
@@ -213,6 +229,12 @@ function openRecord(id = '') {
 }
 $('newRecord').onclick = () => ['interview', 'schedule'].includes(view) ? calendarUI.openEvent() : openRecord();
 $('emptyAdd').onclick = () => openRecord();
+$('eventAiOpen').onclick = () => { $('eventAiText').value = ''; $('eventAiError').textContent = ''; $('eventAiDialog').showModal(); };
+$('eventAiForm').onsubmit = async event => {
+  event.preventDefault(); const button = $('eventAiSubmit'); button.disabled = true; $('eventAiError').textContent = '正在识别…';
+  try { const result = await api('/api/ai/event', { text: $('eventAiText').value }); state = await api('/api/events', { event: result.event, baseRevision: state.revision }); $('eventAiDialog').close(); render(); toast('邀约已识别并记录到日程'); }
+  catch (error) { $('eventAiError').textContent = error.message; } finally { button.disabled = false; }
+};
 $('formStage').onchange = () => { const fields = $('recordForm').elements; if (fields.screening.value === '未投递') fields.screening.value = '待反馈'; };
 $('formScreening').onchange = () => { if ($('formScreening').value === '未通过') $('formStage').value = '已结束'; };
 $('recordForm').onsubmit = async event => {
@@ -246,7 +268,8 @@ $('batchApply').onclick = async () => { $('batchApply').disabled = true; try { s
 async function diagnostics() {
   try {
     const result = await api('/api/diagnostics');
-    $('diagnosticsOutput').textContent = [`服务版本：${result.version}；浏览器：${result.bridge.connected ? '已连接' : '未连接'}${result.bridge.version ? `（扩展 ${result.bridge.version}）` : ''}`, result.selfTest ? `自检：${result.selfTest.message}` : '', ...result.events.slice(-25).map(item => {
+    const capture = await api('/api/pages/debug').catch(() => ({ capture: null }));
+    $('diagnosticsOutput').textContent = [`服务版本：${result.version}；浏览器：${result.bridge.connected ? '已连接' : '未连接'}${result.bridge.version ? `（扩展 ${result.bridge.version}）` : ''}`, capture.capture ? `最近截图：${capture.capture.photos} 张，页面文字 ${capture.capture.textLen} 字，模型返回 ${capture.capture.rows} 条；图片长度 ${capture.capture.images.map(image => image.length).join(', ')}` : '最近截图：无', result.selfTest ? `自检：${result.selfTest.message}` : '', ...result.events.slice(-25).map(item => {
       const time = new Date(item.at).toLocaleTimeString('zh-CN', { hour12: false });
       if (item.event === 'refresh.read') return `${time} 核对读取：${item.company || ''} 文本${item.textLength ?? '?'}字 范围${item.scope || '?'}${item.loginish ? ' 疑似登录页' : ''}${item.matches ? '' : ' 未含进度关键词'}`;
       if (item.event?.startsWith('refresh.image')) return `${time} 截图核对：${item.reason || '完成'}`;
@@ -294,6 +317,13 @@ $('aiTest').onclick = async () => {
 $('settingsOpen').onclick = () => { $('settingsDialog').showModal(); $('aiConsentOnce').checked = state.aiEnabled; loadSettings(); diagnostics(); };
 $('diagnosticsRefresh').onclick = diagnostics;
 $('connectBrowser').onclick = async () => { $('connectBrowser').disabled = true; $('pairNotice').textContent = '正在连接浏览器…'; try { const info = await api('/api/pairing'); await browserBridge('PAIR', { token: info.token }); $('pairNotice').textContent = '浏览器已连接，之后可在台账中直接点击执行'; await diagnostics(); } catch (error) { $('pairNotice').textContent = error.message; } finally { $('connectBrowser').disabled = false; } };
+async function autoConnectBrowser() {
+  try {
+    const info = await api('/api/pairing');
+    const result = await browserBridge('PAIR', { token: info.token });
+    if (result?.ok) { $('pairNotice').textContent = '浏览器已自动连接'; await diagnostics(); }
+  } catch { /* The extension may not be installed or the page may be opened first. */ }
+}
 $('runSelfTest').onclick = async () => {
   $('runSelfTest').disabled = true;
   try { if (!$('aiConsentOnce').checked) throw new Error('请先确认整页截图外发授权'); const connection = await browserBridge('PING'); if (connection.busy) throw new Error('浏览器正在执行任务，请稍后自检'); await api('/api/bridge/self-test/start', { confirmed: true }); await browserBridge('RUN'); $('pairNotice').textContent = '正在检查列表识别、登录保护、截图和 AI 接口…'; clearInterval(diagnosticPolling); diagnosticPolling = setInterval(diagnostics, 2500); }
@@ -306,7 +336,7 @@ async function refreshPageJob() {
     ({ job: pageJob } = await api('/api/pages'));
     if (!pageJob) return;
     $('pageProgress').textContent = pageJob.message;
-    $('pageWarnings').textContent = [...(pageJob.warnings || []), ...(pageJob.more ? ['页面还有分页或更多内容，本次不代表全部历史投递。'] : []), ...(pageJob.skipped ? [`跳过 ${pageJob.skipped} 个不适合发送的区域。`] : [])].join('\n');
+    $('pageWarnings').textContent = [...(pageJob.warnings || []), ...(pageJob.more && !pageJob.singlePage ? ['页面可能还有下一页，本次结果不代表全部历史投递。'] : []), ...(pageJob.skipped ? [`跳过 ${pageJob.skipped} 个不适合发送的区域。`] : [])].join('\n');
     const terminal = ['ready', 'failed', 'imported'].includes(pageJob.status);
     if (terminal) { clearInterval(pagePolling); $('pageStart').disabled = false; }
     $('pageApply').disabled = pageJob.status !== 'ready' || !pageJob.rows.some(row => row.action !== 'conflict');
@@ -335,5 +365,5 @@ $('pageApply').onclick = async () => {
   $('pageApply').disabled = true; $('pageError').textContent = '';
   try { const rows = [...$('pageRows').querySelectorAll('tr')].filter(row => row.querySelector('[data-save]').checked && !row.querySelector('[data-save]').disabled).map(row => ({ index: Number(row.dataset.index), ...Object.fromEntries([...row.querySelectorAll('[data-field]')].map(input => [input.dataset.field, input.value])) })); state = await api('/api/pages/apply', { id: pageJob.id, rows, confirmed: true }); render(); $('pageRows').replaceChildren(); pageRendered = ''; pageJob = null; $('pageProgress').textContent = '本次解析已完成，结果已保存'; toast('已保存识别出的投递记录'); } catch (error) { $('pageError').textContent = error.message; $('pageApply').disabled = false; }
 };
-try { const health = await api('/api/health'); if (health.version !== 4) throw new Error('当前是旧版服务，请使用统一入口 http://127.0.0.1:4319'); state = await api('/api/state'); const initial = (location.hash || '').slice(1); setView(['interview', 'schedule'].includes(initial) ? initial : 'all'); } catch (error) { $('loadError').hidden = false; $('loadError').textContent = `无法载入台账：${error.message}`; $('saveState').textContent = '本地服务不可用或版本不匹配'; for (const id of ['newRecord', 'syncOpen', 'importOpen', 'pageOpen']) $(id).disabled = true; }
+try { const health = await api('/api/health'); if (health.version !== 4) throw new Error('当前是旧版服务，请使用统一入口 http://127.0.0.1:4319'); state = await api('/api/state'); const initial = (location.hash || '').slice(1); setView(['interview', 'schedule'].includes(initial) ? initial : 'all'); void autoConnectBrowser(); } catch (error) { $('loadError').hidden = false; $('loadError').textContent = `无法载入台账：${error.message}`; $('saveState').textContent = '本地服务不可用或版本不匹配'; for (const id of ['newRecord', 'syncOpen', 'importOpen', 'pageOpen']) $(id).disabled = true; }
 icons();

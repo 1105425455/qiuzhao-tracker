@@ -5,8 +5,8 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { once } from 'node:events';
 import { request as httpRequest } from 'node:http';
-import { normalize, screeningCandidate, progressCandidate, classifyDirection, scopeToPosition } from './model.mjs';
-import { createServer, importPreview, samePage, looksLikeLogin } from './server.mjs';
+import { normalize, screeningCandidate, progressCandidate, classifyDirection, scopeToPosition, normalizeApplyTime } from './model.mjs';
+import { createServer, importPreview, samePage, looksLikeLogin, EXTENSION_VERSION } from './server.mjs';
 import { recognizeImage, analyze, extractApplications, parseLooseJson } from './ai.mjs';
 import { apiForModel, MODEL_CATALOG } from './models.mjs';
 import { normalizeEvent, scheduledEvents, legacyEventKey } from './calendar.mjs';
@@ -17,7 +17,7 @@ const root = dirname(fileURLToPath(import.meta.url));
 const base = { company: '测试公司', position: '语音算法', applyTime: '2026-09-01', stage: '简历筛选中', screening: '待反馈', direction: '语音算法', url: 'https://iflytek.zhiye.com/campus/jobs' };
 async function announce(origin) {
   const pair = await (await fetch(origin + '/api/pairing')).json();
-  const response = await fetch(origin + '/api/bridge/hello', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ version: '0.4.0' }) });
+  const response = await fetch(origin + '/api/bridge/hello', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1', Authorization: `Bearer ${pair.token}` }, body: JSON.stringify({ version: EXTENSION_VERSION }) });
   assert.equal(response.status, 200); return pair;
 }
 test('source matching tolerates SPA reroutes but flags real login pages', () => {
@@ -139,6 +139,20 @@ test('validate dates, URLs and contradictory states', () => {
   assert.throws(() => normalize({ ...base, screening: '未通过', stage: '面试' }));
   assert.equal(normalize({ ...base, applyTime: '' }).applyTime, '');
   assert.equal(normalize({ ...base, stage: '已结束' }).screening, '待反馈');
+});
+test('stale year in an application date is corrected to the current year', () => {
+  const today = new Date('2026-09-12T10:00:00+08:00');
+  // Same month-day, past year => this year (the campus season is current).
+  assert.equal(normalizeApplyTime('2025-09-12', today), '2026-09-12');
+  assert.equal(normalizeApplyTime('2024-09-03', today), '2026-09-03');
+  // Current or future dates are kept as-is.
+  assert.equal(normalizeApplyTime('2026-09-10', today), '2026-09-10');
+  assert.equal(normalizeApplyTime('2026-10-01', today), '2026-10-01');
+  // A later month-day in an older year must not be moved into the future.
+  assert.equal(normalizeApplyTime('2025-11-20', today), '2025-11-20');
+  // Invalid values stay empty so callers can fall back.
+  assert.equal(normalizeApplyTime('2026-02-30', today), '');
+  assert.equal(normalizeApplyTime('', today), '');
 });
 test('status capture never equates end or action buttons with rejection', () => {
   assert.equal(screeningCandidate('流程结束\n撤回申请\n未回复').screening, null);
@@ -442,9 +456,8 @@ test('Moka page discovery runs rules then whole-page AI, previews and confirms m
     const pair = await announce(origin);
     const job = (await req('/api/pages/start', { url: source, company: '', baseRevision: 1 })).data.job;
     const result = await req('/api/pages/result', { id: job.id, url: source, title: '我的投递', pageText: '我的投递 语音算法 多模态算法', cards: [{ text: '我的投递 语音算法 多模态算法', group: true }] }, pair.token);
-    assert.equal(result.data.needsImage, true); assert.equal(calls, 0);
+    assert.equal(result.data.needsImage, false); assert.equal(calls, 1);
     assert.equal((await req('/api/pages/apply', { id: job.id, rows: [], confirmed: true })).status, 400);
-    assert.equal((await req('/api/pages/images', { id: job.id, url: source, image: png }, pair.token)).status, 200); assert.equal(calls, 1);
     const preview = (await req('/api/pages')).data.job; assert.equal(preview.status, 'ready'); assert.equal(preview.rows.length, 2); assert.equal(preview.rows[0].action, 'update'); assert.equal(preview.rows[1].action, 'add');
     assert.equal((await req('/api/state')).data.records.length, 1);
     state = (await req('/api/pages/apply', { id: job.id, rows: preview.rows.map(row => ({ index: row.index, ...row.record })), confirmed: true })).data;
@@ -536,4 +549,13 @@ test('two records on one page are both matched from a single page text', async (
     assert.equal(state.records.find(r => r.id === second.id).screening, '待反馈');
     assert(state.records.every(r => r.lastCheckedAt));
   } finally { await new Promise(resolve => server.close(resolve)); }
+});
+// The extension version is declared in three places (server constant, extension
+// service worker, extension manifest). A drift between them silently breaks every
+// browser call with "请更新官网采集扩展", so guard it here instead of by memory.
+test('extension version is identical in server, service worker and manifest', () => {
+  const worker = readFileSync(join(root, 'extension', 'background.js'), 'utf8');
+  const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));
+  assert.equal(/const VERSION = '([^']+)'/.exec(worker)?.[1], EXTENSION_VERSION);
+  assert.equal(manifest.version, EXTENSION_VERSION);
 });
