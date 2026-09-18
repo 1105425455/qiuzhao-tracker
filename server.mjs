@@ -10,7 +10,7 @@ import { analyze, extractEvent, recognizeImage, recognizeText, extractApplicatio
 import { normalizeEvent, legacyEventKey } from './calendar.mjs';
 
 const root = dirname(fileURLToPath(import.meta.url));
-export const EXTENSION_VERSION = '0.4.28';
+export const EXTENSION_VERSION = '0.4.29';
 const Papa = createRequire(import.meta.url)('./vendor/papaparse.js');
 const files = new Map([
   ['/', ['index.html', 'text/html']], ['/app.js', ['app.js', 'text/javascript']],

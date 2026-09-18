@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "秋招台账 · 官网采集",
-  "version": "0.4.28",
+  "version": "0.4.29",
   "description": "用户触发批量核对官网进度，规则失败时按本轮授权截图供 AI 核验。",
   "permissions": ["scripting", "storage", "debugger"],
   "host_permissions": ["http://127.0.0.1/*", "https://*/*", "http://*/*"],

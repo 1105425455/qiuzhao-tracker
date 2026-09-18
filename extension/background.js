@@ -3,7 +3,7 @@ import { scanApplications } from './scan-list.js';
 import { resizeScreenshot } from './image.js';
 import { captureViewports } from './capture.mjs';
 let busy = false, message = '尚未执行核对', runStartedAt = 0;
-const VERSION = '0.4.28';
+const VERSION = '0.4.29';
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
 const STALE_MS = 10 * 60 * 1000;
 function markRunning() { runStartedAt = Date.now(); busy = true; }
@@ -288,7 +288,7 @@ async function run() {
     const { api, endpoint } = await connection();
     const { batchId, tasks, page, selfTest } = await api('/api/refresh/tasks');
     if (!tasks.length && !page && !selfTest) { message = '没有待执行任务'; return; }
-    if (selfTest) { const tab = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = tab.id; await selfCheck(api, endpoint, tab.id, selfTest); }
+    if (selfTest) { const tab = await chrome.tabs.create({ url: 'about:blank', active: false }); tabId = tab.id; try { await selfCheck(api, endpoint, tab.id, selfTest); } finally { await closeTab(tabId); tabId = null; } }
     if (page) await collectPage(api, page);
     if (tasks.length) {
       const total = tasks.length;
