@@ -1,17 +1,19 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { createServer } from 'node:net';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const entry = join(root, 'server.mjs');
-const directory = join(root, 'data/tracker');
+const directory = process.env.TRACKER_DATA_DIR ? resolve(process.env.TRACKER_DATA_DIR) : join(root, 'data/tracker');
 const registry = join(directory, 'server-process.json');
 mkdirSync(directory, { recursive: true, mode: 0o700 });
 if (existsSync(registry)) {
   const previous = JSON.parse(readFileSync(registry, 'utf8'));
-  if (Number.isSafeInteger(previous.pid) && previous.pid > 1 && previous.entry === entry) {
+  let sameEntry = previous.entry === entry;
+  try { sameEntry ||= realpathSync(previous.entry) === realpathSync(entry); } catch { /* stale or moved entry */ }
+  if (Number.isSafeInteger(previous.pid) && previous.pid > 1 && sameEntry) {
     // Verify the recorded pid is really our server before stopping it. `ps` is
     // unix-only, so on Windows we skip the identity check and just try SIGTERM,
     // which Node emulates as a forceful terminate.
@@ -19,7 +21,11 @@ if (existsSync(registry)) {
     if (process.platform !== 'win32') {
       command = spawnSync('ps', ['-p', String(previous.pid), '-o', 'command='], { encoding: 'utf8' }).stdout.trim();
     }
-    if (command === null || command === `${previous.node} ${entry}`) {
+    let sameCommand = command === null || command === `${previous.node} ${entry}`;
+    if (!sameCommand && command?.startsWith(`${previous.node} `)) {
+      try { sameCommand = realpathSync(command.slice(previous.node.length + 1)) === realpathSync(entry); } catch { /* stale command */ }
+    }
+    if (sameCommand) {
       console.log('正在重启本项目登记的台账服务，不处理其他应用。');
       try { process.kill(previous.pid, 'SIGTERM'); } catch { /* already gone */ }
       for (let n = 0; n < 30; n++) {
