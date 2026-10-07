@@ -1,11 +1,11 @@
 import { EVENT_KINDS, EVENT_STATUSES, normalizeEvent, scheduledEvents } from './calendar.mjs';
 
-export function setupCalendar({ getState, save, notify }) {
+export function setupCalendar({ getState, save, notify, toggleComplete }) {
   const $ = id => document.getElementById(id);
   const form = $('eventForm');
   let calendar, suggestedTitle = '';
   const today = () => new Date().toLocaleDateString('en-CA');
-  const colors = { 笔试: '#b07d2b', 面试: '#3f6fb5', 其他安排: '#4c8a6a' };
+  const colors = { 笔试: '#b07d2b', 面试: '#3f6fb5', 截止事项: '#b9574f', 其他安排: '#4c8a6a' };
   for (const [id, values] of [['eventKind', EVENT_KINDS], ['eventStatus', EVENT_STATUSES], ['eventKindFilter', EVENT_KINDS], ['eventStatusFilter', EVENT_STATUSES]]) {
     for (const value of values) $(id).add(new Option(value, value));
   }
@@ -84,14 +84,15 @@ export function setupCalendar({ getState, save, notify }) {
   }
 
   function render() {
-    if ($('calendarView').hidden) return;
+    const hidden = $('calendarView').hidden;
+    if (hidden && !calendar) return;
     if (!window.FullCalendar) { $('calendarError').textContent = '日历资源未加载，请刷新页面。'; return; }
     $('calendarError').textContent = '';
     if (!calendar) {
       const wanted = (new URLSearchParams(location.search).get('cal') === 'week') ? 'timeGridWeek' : 'dayGridMonth';
       calendar = new window.FullCalendar.Calendar($('calendar'), {
         initialView: wanted, locale: 'zh-cn', firstDay: 1, timeZone: 'local',
-        headerToolbar: false, height: 640, fixedWeekCount: true, dayMaxEvents: 3,
+        headerToolbar: false, height: 640, fixedWeekCount: true, dayMaxEvents: false, dayMaxEventRows: false,
         editable: false, eventStartEditable: false, eventDurationEditable: false,
         nowIndicator: true, allDayText: '全天', slotMinTime: '07:00:00', slotMaxTime: '23:30:00', scrollTime: '08:00:00', slotDuration: '00:30:00',
         eventTimeFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
@@ -102,10 +103,27 @@ export function setupCalendar({ getState, save, notify }) {
         },
         viewDidMount: info => { if (info.view.type.startsWith('timeGrid')) scrollToFirstEvent(); },
         dateClick: info => openEvent('', { date: info.dateStr.slice(0, 10), startTime: info.allDay ? '' : info.dateStr.slice(11, 16) }),
-        eventClick: info => { info.jsEvent.preventDefault(); openEvent(info.event.id); },
+        eventClick: info => { if (!info.event.url) { info.jsEvent.preventDefault(); openEvent(info.event.id); } },
         eventDidMount: info => {
           const value = info.event.extendedProps;
-          info.el.title = `${info.event.title} · ${value.kind} · ${value.status}${value.location ? ` · ${value.location}` : ''}`;
+          const check = document.createElement('button');
+          check.type = 'button'; check.className = 'event-complete';
+          check.textContent = value.status === '已完成' ? '✓' : '';
+          check.setAttribute('aria-label', `${value.status === '已完成' ? '恢复待进行' : '标记完成'}：${info.event.title}`);
+          check.setAttribute('aria-pressed', String(value.status === '已完成'));
+          check.onclick = async event => {
+            event.preventDefault(); event.stopPropagation(); check.disabled = true;
+            try { await toggleComplete(info.event.id); }
+            catch (error) { notify(error.message); }
+            finally { check.disabled = false; }
+          };
+          info.el.prepend(check);
+          info.el.title = `${info.event.title} · ${value.kind} · ${value.status}`;
+          if (info.event.url) {
+            info.el.setAttribute('target', '_blank');
+            info.el.setAttribute('rel', 'noopener noreferrer');
+            info.el.title += ' · 点击打开链接';
+          }
         }
       });
       calendar.render();
@@ -116,8 +134,14 @@ export function setupCalendar({ getState, save, notify }) {
       calendar.addEventSource(selected.map(event => {
         const record = getState().records.find(item => item.id === event.recordId);
         const who = record ? record.company : '';
+        const link = (event.location || '').match(/https?:\/\/[^\s<>"，。；）]+/i)?.[0] || record?.url || '';
+        let url = '';
+        try {
+          const parsed = new URL(link);
+          if (['https:', 'http:'].includes(parsed.protocol) && !parsed.username && !parsed.password) url = parsed.href;
+        } catch { /* A location can be a street address rather than a link. */ }
         return {
-          id: event.id, title: event.title, allDay: event.allDay,
+          id: event.id, title: event.title, allDay: event.allDay, url,
           start: event.allDay ? event.date : `${event.date}T${event.startTime}:00`,
           end: !event.allDay && event.endTime ? `${event.date}T${event.endTime}:00` : undefined,
           backgroundColor: colors[event.kind], borderColor: colors[event.kind], textColor: '#ffffff',
@@ -126,8 +150,7 @@ export function setupCalendar({ getState, save, notify }) {
         };
       }));
     });
-    calendar.updateSize();
-    sizeCalendar();
+    if (!hidden) { calendar.updateSize(); sizeCalendar(); }
   }
   $('calendarPrev').onclick = () => calendar?.prev();
   $('calendarNext').onclick = () => calendar?.next();

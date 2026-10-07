@@ -1,12 +1,12 @@
-export const EVENT_KINDS = ['笔试', '面试', '其他安排'];
+export const EVENT_KINDS = ['笔试', '面试', '截止事项', '其他安排'];
 export const EVENT_STATUSES = ['待进行', '已完成', '已取消'];
 
 export function normalizeEvent(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('日程格式不正确');
   const event = {};
-  for (const field of ['id', 'recordId', 'title', 'kind', 'date', 'startTime', 'endTime', 'location', 'notes', 'status', 'legacyKey']) {
+  for (const field of ['id', 'recordId', 'title', 'kind', 'date', 'startTime', 'endTime', 'location', 'notes', 'userNotes', 'status', 'legacyKey']) {
     const value = input[field] ?? '';
-    if (typeof value !== 'string' || value.length > (field === 'notes' ? 5000 : 1500)) throw new Error('日程字段格式不正确或内容过长');
+    if (typeof value !== 'string' || value.length > (['notes', 'userNotes'].includes(field) ? 5000 : 1500)) throw new Error('日程字段格式不正确或内容过长');
     event[field] = field === 'notes' ? value : value.trim();
   }
   if (!event.title || event.title.length > 200) throw new Error('请填写日程标题，最多 200 字');

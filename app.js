@@ -17,7 +17,15 @@ async function api(path, body) {
 function options(id, values) { $(id).insertAdjacentHTML('beforeend', values.map(v => `<option>${esc(v)}</option>`).join('')); }
 // Each application stage gets its own colour, so stages are visually distinct.
 const STAGE_CLASS = { 简历筛选中: "s-screening", 笔试: "s-written", 面试: "s-interview", Offer: "s-offer", 已结束: "s-ended", 已撤回: "s-withdrawn" };
-const calendarUI = setupCalendar({ getState: () => state, notify: toast, save: async event => { state = await api('/api/events', { event, baseRevision: state.revision, confirmed: !!event.id }); render(); } });
+async function toggleEventComplete(id) {
+  const current = scheduledEvents(state.records, state.events).find(event => event.id === id);
+  if (!current) throw new Error('日程已变化，请刷新后重试');
+  const event = { ...current, status: current.status === '已完成' ? '待进行' : '已完成' };
+  if (event.legacy) event.id = '';
+  state = await api('/api/events', { event, baseRevision: state.revision, confirmed: !!event.id });
+  render(); toast(event.status === '已完成' ? '已标记完成，可在日历中再次点击取消完成' : '已恢复待进行');
+}
+const calendarUI = setupCalendar({ getState: () => state, notify: toast, toggleComplete: toggleEventComplete, save: async event => { state = await api('/api/events', { event, baseRevision: state.revision, confirmed: !!event.id }); render(); } });
 for (const [id, values] of [['directionFilter', DIRECTIONS], ['stageFilter', STAGES], ['screenFilter', SCREENINGS], ['formDirection', DIRECTIONS], ['formStage', STAGES], ['formScreening', SCREENINGS], ['formRank', RANKS]]) options(id, values);
 // Put the stage colour on the filter itself so the chosen stage is easy to recognise.
 $('stageFilter').classList.add('stage-select');
@@ -150,14 +158,33 @@ function render() {
   $('scheduleCount').textContent = `${due.length} 项安排`;
   $('scheduleList').innerHTML = due.length ? due.map(event => {
     const record = state.records.find(record => record.id === event.recordId);
-    return `<div class="schedule-row ${event.date < today ? 'overdue' : ''}"><span class="schedule-date">${esc(event.date)}<br>${event.allDay ? '全天 / 待定' : esc(event.startTime + (event.endTime ? ` - ${event.endTime}` : ''))}</span><div><h3>${esc(event.title)}</h3><p>${record ? `${esc(record.company)} · ${esc(record.position)}` : '独立日程'}${event.location ? ` · ${esc(event.location)}` : ''}</p></div>${badge(event.kind)}<button class="icon-button" data-event="${esc(event.id)}" title="编辑日程" aria-label="编辑 ${esc(event.title)}"><i data-lucide="pencil"></i></button></div>`;
+    const date = new Date(`${event.date}T12:00:00`);
+    const tomorrow = new Date(`${today}T12:00:00`); tomorrow.setDate(tomorrow.getDate() + 1);
+    const relative = event.date === today ? '今天' : date.getTime() === tomorrow.getTime() ? '明天' : '';
+    const dateLabel = `${event.date.slice(0, 4) === today.slice(0, 4) ? '' : `${date.getFullYear()}年`}${date.getMonth() + 1}月${date.getDate()}日 · ${['周日', '周一', '周二', '周三', '周四', '周五', '周六'][date.getDay()]}`;
+    const dateBlock = `<span class="schedule-date"><span class="schedule-day">${esc(dateLabel)}</span><strong>${event.allDay ? '全天 / 待定' : esc(event.startTime)}</strong><small>${event.kind === '截止事项' ? '截止时间' : event.endTime ? `至 ${esc(event.endTime)}` : '开始时间'}</small>${relative ? `<span class="schedule-relative">${relative}</span>` : ''}</span>`;
+    if (event.kind === '截止事项') {
+      const remaining = new Date(`${event.date}T${event.allDay ? '23:59' : event.startTime}:00`).getTime() - Date.now();
+      const hours = Math.ceil(remaining / 3600000);
+      const hint = remaining <= 0 ? '已截止' : hours <= 24 ? `距截止不足 ${hours} 小时` : `距截止约 ${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+      event = { ...event, title: `${event.title} · ${hint}` };
+    }
+    const location = esc(event.location || '').replace(/https?:\/\/[^\s<>]+/g, url => `<a href="${url}" target="_blank" rel="noopener noreferrer">${url}</a>`);
+    return `<div class="schedule-row ${event.date < today ? 'overdue' : ''}">${dateBlock}<div><h3>${esc(event.title)}</h3><p>${record ? `${esc(record.company)} · ${esc(record.position)}` : '独立日程'}${location ? ` · ${location}` : ''}</p>${event.userNotes ? `<p class="schedule-notes">${esc(event.userNotes)}</p>` : ''}</div>${badge(event.kind)}<div class="schedule-actions"><button class="button quiet" data-event-note="${esc(event.id)}">${event.userNotes ? '编辑备注' : '添加记录'}</button><button class="icon-button" data-event="${esc(event.id)}" title="编辑日程" aria-label="编辑 ${esc(event.title)}"><i data-lucide="pencil"></i></button><button class="icon-button danger" data-event-delete="${esc(event.id)}" title="删除日程" aria-label="删除 ${esc(event.title)}"><i data-lucide="trash-2"></i></button></div></div>`;
   }).join('') : '<div class="empty-state"><h3>暂无后续安排</h3></div>';
+  $('scheduleList').querySelectorAll('[data-event]').forEach(edit => {
+    const check = document.createElement('button'); check.type = 'button'; check.className = 'icon-button';
+    check.textContent = '○'; check.title = '标记完成'; check.setAttribute('aria-label', '标记日程完成');
+    check.onclick = async () => { check.disabled = true; try { await toggleEventComplete(edit.dataset.event); } catch (error) { toast(error.message); } finally { check.disabled = false; } };
+    edit.before(check);
+  });
   calendarUI.render();
   icons();
 }
 function setView(next) {
   view = next;
   const scheduling = view === 'interview' || view === 'schedule';
+  $('eventAiOpen').hidden = !scheduling;
   $('recordsView').hidden = scheduling; $('recordFilters').hidden = scheduling;
   $('scheduleView').hidden = view !== 'schedule'; $('calendarView').hidden = view !== 'interview'; $('syncOpen').hidden = scheduling;
   $('pageOpen').hidden = scheduling; $('newRecord').classList.toggle('primary', scheduling);
@@ -167,7 +194,19 @@ function setView(next) {
   document.querySelectorAll('[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === view));
   render();
 }
-document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { setView(button.dataset.view); history.replaceState(null, '', button.dataset.view === 'all' ? location.pathname : `#${button.dataset.view}`); });
+let stateRefresh = null;
+function syncSavedState() {
+  if (document.hidden) return;
+  if (stateRefresh) return stateRefresh;
+  stateRefresh = api('/api/state').then(latest => {
+    // Do not let an older response overwrite a save that finished meanwhile.
+    if (latest.revision > state.revision) { state = latest; render(); }
+  }).catch(error => toast(`同步日程失败：${error.message}`)).finally(() => { stateRefresh = null; });
+  return stateRefresh;
+}
+window.addEventListener('focus', syncSavedState);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) void syncSavedState(); });
+document.querySelectorAll('[data-view]').forEach(button => button.onclick = () => { setView(button.dataset.view); history.replaceState(null, '', button.dataset.view === 'all' ? location.pathname : `#${button.dataset.view}`); void syncSavedState(); });
 for (const id of ['search', 'directionFilter', 'stageFilter', 'screenFilter', 'sortOrder']) $(id).addEventListener('input', render);
 $('sortDir').onclick = () => {
   const next = $('sortDir').dataset.dir === 'asc' ? 'desc' : 'asc';
@@ -229,10 +268,72 @@ function openRecord(id = '') {
 }
 $('newRecord').onclick = () => ['interview', 'schedule'].includes(view) ? calendarUI.openEvent() : openRecord();
 $('emptyAdd').onclick = () => openRecord();
-$('eventAiOpen').onclick = () => { $('eventAiText').value = ''; $('eventAiError').textContent = ''; $('eventAiDialog').showModal(); };
+$('newRecord').before($('eventAiOpen'));
+let invitationImage = '', invitationImageLoading = false;
+const imageControls = document.createElement('div');
+imageControls.innerHTML = '<label class="button">选择截图（可选）<input type="file" accept="image/*" hidden></label><button type="button" class="button quiet" hidden>移除截图</button><p class="muted">可直接粘贴截图；文字可补充收件时间。截图会随本次识别发送给已配置的 AI。</p><img alt="待识别的邀约截图" hidden style="max-width:100%;max-height:220px">';
+$('eventAiText').after(imageControls);
+const invitationPreview = imageControls.querySelector('img');
+const clearInvitationImage = () => { invitationImage = ''; invitationPreview.hidden = true; invitationPreview.removeAttribute('src'); imageControls.querySelector('button').hidden = true; imageControls.querySelector('input').value = ''; };
+imageControls.querySelector('button').onclick = clearInvitationImage;
+async function loadInvitationImage(file) {
+  if (!file || invitationImageLoading) return;
+  invitationImageLoading = true; $('eventAiSubmit').disabled = true;
+  try {
+    if (!file.type.startsWith('image/') || file.size > 15 * 1024 * 1024) throw new Error('请选择不超过 15MB 的图片');
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, 800 / Math.max(bitmap.width, bitmap.height));
+    const canvas = document.createElement('canvas'); canvas.width = Math.max(1, Math.round(bitmap.width * scale)); canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    canvas.getContext('2d').drawImage(bitmap, 0, 0, canvas.width, canvas.height); bitmap.close();
+    invitationImage = canvas.toDataURL('image/png'); invitationPreview.src = invitationImage; invitationPreview.hidden = false; imageControls.querySelector('button').hidden = false; $('eventAiError').textContent = '';
+  } catch (error) { $('eventAiError').textContent = error.message; }
+  finally { invitationImageLoading = false; $('eventAiSubmit').disabled = false; }
+}
+imageControls.querySelector('input').onchange = event => loadInvitationImage(event.target.files[0]);
+$('eventAiText').addEventListener('paste', event => {
+  const image = [...(event.clipboardData?.items || [])].find(item => item.type.startsWith('image/'));
+  if (image) { event.preventDefault(); loadInvitationImage(image.getAsFile()); }
+});
+$('eventAiOpen').onclick = () => { $('eventAiText').value = ''; clearInvitationImage(); $('eventAiError').textContent = ''; $('eventAiDialog').showModal(); };
+const noteDialog = document.createElement('dialog');
+noteDialog.innerHTML = '<form><header class="dialog-header"><h2>日程备注</h2></header><div class="dialog-body"><p class="muted"></p><textarea aria-label="备注内容" placeholder="记录你想写的内容，例如面试准备、问题或复盘……" rows="8" maxlength="5000" style="width:100%;box-sizing:border-box"></textarea><p class="form-error" role="alert"></p></div><footer class="dialog-footer"><button type="button" class="button">取消</button><button type="submit" class="button primary">保存备注</button></footer></form>';
+document.body.append(noteDialog);
+let noteTarget = null, noteRevision = 0;
+noteDialog.querySelector('[type="button"]').onclick = () => noteDialog.close();
+noteDialog.querySelector('form').onsubmit = async event => {
+  event.preventDefault();
+  const button = noteDialog.querySelector('[type="submit"]'); button.disabled = true;
+  try {
+    const value = { ...noteTarget, userNotes: noteDialog.querySelector('textarea').value };
+    if (value.legacy) value.id = '';
+    state = await api('/api/events', { event: value, baseRevision: noteRevision, confirmed: !!value.id });
+    noteDialog.close(); render(); toast('备注已保存');
+  } catch (error) { noteDialog.querySelector('.form-error').textContent = error.message; }
+  finally { button.disabled = false; }
+};
+document.addEventListener('click', async event => {
+  const note = event.target.closest('[data-event-note]');
+  if (note) {
+    noteTarget = scheduledEvents(state.records, state.events).find(item => item.id === note.dataset.eventNote);
+    if (!noteTarget) return;
+    noteRevision = state.revision;
+    noteDialog.querySelector('.muted').textContent = noteTarget.title;
+    noteDialog.querySelector('.form-error').textContent = '';
+    const field = noteDialog.querySelector('textarea'); field.value = noteTarget.userNotes || '';
+    noteDialog.showModal(); field.focus(); field.setSelectionRange(field.value.length, field.value.length);
+  }
+  const button = event.target.closest('[data-event-delete]');
+  if (!button || button.disabled) return;
+  const target = scheduledEvents(state.records, state.events).find(item => item.id === button.dataset.eventDelete);
+  if (!target || !confirm(`删除日程“${target.title}”？该日程的备注将一并删除，投递记录保留。`)) return;
+  button.disabled = true;
+  try { state = await api('/api/events/delete', { id: target.id, baseRevision: state.revision, confirmed: true }); render(); toast('日程已删除'); }
+  catch (error) { toast(error.message); }
+  finally { button.disabled = false; }
+});
 $('eventAiForm').onsubmit = async event => {
   event.preventDefault(); const button = $('eventAiSubmit'); button.disabled = true; $('eventAiError').textContent = '正在识别…';
-  try { const result = await api('/api/ai/event', { text: $('eventAiText').value }); state = await api('/api/events', { event: result.event, baseRevision: state.revision }); $('eventAiDialog').close(); render(); toast('邀约已识别并记录到日程'); }
+  try { const result = await api('/api/ai/event', { text: $('eventAiText').value, image: invitationImage }); state = await api('/api/events', { event: result.event, baseRevision: state.revision }); $('eventAiDialog').close(); clearInvitationImage(); render(); toast('邀约已识别并记录到日程'); }
   catch (error) { $('eventAiError').textContent = error.message; } finally { button.disabled = false; }
 };
 $('formStage').onchange = () => { const fields = $('recordForm').elements; if (fields.screening.value === '未投递') fields.screening.value = '待反馈'; };

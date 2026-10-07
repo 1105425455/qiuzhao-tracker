@@ -3,6 +3,7 @@ ROOT="${0:A:h}"
 NODE=""
 for candidate in \
   "$(command -v node 2>/dev/null)" \
+  "/Applications/Cursor.app/Contents/Resources/app/resources/helpers/node" \
   "/opt/homebrew/bin/node" \
   "/usr/local/bin/node"; do
   if [[ -n "$candidate" && -x "$candidate" ]]; then NODE="$candidate"; break; fi

@@ -6,7 +6,7 @@ import { createServer } from 'node:net';
 
 const root = dirname(fileURLToPath(import.meta.url));
 const entry = join(root, 'server.mjs');
-const directory = join(root, '../data/tracker');
+const directory = join(root, 'data/tracker');
 const registry = join(directory, 'server-process.json');
 mkdirSync(directory, { recursive: true, mode: 0o700 });
 if (existsSync(registry)) {
@@ -34,7 +34,7 @@ await new Promise((resolve, reject) => {
   const check = createServer(); check.once('error', () => reject(new Error(`端口 ${port} 被其他或未登记的服务占用，未自动结束它。`)));
   check.listen(port, '127.0.0.1', () => check.close(resolve));
 });
-const child = spawn(process.execPath, [entry], { cwd: root, env: { ...process.env, PORT: String(port) }, stdio: 'inherit' });
+const child = spawn(process.execPath, [entry], { cwd: root, env: { ...process.env, PORT: String(port), TRACKER_DATA_DIR: directory }, stdio: 'inherit' });
 child.once('error', () => { console.error('台账服务启动失败'); process.exitCode = 1; });
 child.once('spawn', () => writeFileSync(registry, JSON.stringify({ pid: child.pid, node: process.execPath, entry, port }), { mode: 0o600 }));
 child.once('exit', (code, signal) => { process.exitCode = signal === 'SIGTERM' ? 0 : code || 0; });

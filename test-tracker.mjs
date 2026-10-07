@@ -553,6 +553,43 @@ test('two records on one page are both matched from a single page text', async (
 // The extension version is declared in three places (server constant, extension
 // service worker, extension manifest). A drift between them silently breaks every
 // browser call with "请更新官网采集扩展", so guard it here instead of by memory.
+test('invitation endpoint requests structured text and saves the extracted meeting', async () => {
+  const dataDir = mkdtempSync(join(root, '.test-runs', 'invitation-'));
+  const invitation = '测试半导体有限公司邀请您参加视频面试。面试日期：2026-09-23 周三；面试时间：17:00；面试岗位：校招音频算法工程师；面试官：测试面试官；面试方式：视频会议；面试链接：https://meeting.example.com/j/123456789';
+  const event = { title: '测试半导体 - 校招音频算法工程师面试', recordId: '', kind: '面试', date: '2026-09-23', allDay: false, startTime: '17:00', endTime: '', location: 'https://meeting.example.com/j/123456789', notes: '测试半导体有限公司；校招音频算法工程师；面试官 测试面试官；视频会议 ID 123456789', status: '待进行' };
+  const server = createServer({ dataDir, aiConfig: { baseUrl: 'https://api.example.com/v1', apiKey: 'test-only', model: 'gpt-5.6-sol', enabled: true }, fetchAI: async (_url, options) => {
+    const body = JSON.parse(options.body);
+    assert.deepEqual(body.response_format, { type: 'json_object' });
+    assert.match(body.messages[0].content, /startTime/);
+    assert.equal(body.messages.at(-1).content, invitation);
+    return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify(event) } }] }));
+  } });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const origin = `http://127.0.0.1:${server.address().port}`;
+  const post = (path, body) => fetch(origin + path, { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Tracker-Request': '1' }, body: JSON.stringify(body) });
+  try {
+    const response = await post('/api/ai/event', { text: invitation });
+    assert.equal(response.status, 200);
+    const parsed = await response.json();
+    assert.deepEqual(parsed.event, event);
+    const saved = await post('/api/events', { event: parsed.event, baseRevision: 0 });
+    assert.equal(saved.status, 200);
+    const state = await saved.json();
+    assert.equal(state.events.length, 1);
+    for (const key of ['title', 'date', 'startTime', 'endTime', 'location', 'notes']) assert.equal(state.events[0][key], event[key]);
+    const id = state.events[0].id;
+    assert.equal((await post('/api/events/delete', { id, baseRevision: state.revision })).status, 400);
+    assert.equal((await post('/api/events/delete', { id, baseRevision: 0, confirmed: true })).status, 409);
+    const deleted = await post('/api/events/delete', { id, baseRevision: state.revision, confirmed: true });
+    assert.equal(deleted.status, 200);
+    const after = await deleted.json();
+    assert.deepEqual(after.events, []);
+    assert.deepEqual(after.records, state.records);
+    assert.equal(JSON.parse(readFileSync(join(dataDir, `revision-${state.revision}.json`), 'utf8')).events[0].id, id);
+    assert.equal((await post('/api/events/delete', { id, baseRevision: after.revision, confirmed: true })).status, 400);
+  } finally { await new Promise(resolve => server.close(resolve)); }
+});
+
 test('extension version is identical in server, service worker and manifest', () => {
   const worker = readFileSync(join(root, 'extension', 'background.js'), 'utf8');
   const manifest = JSON.parse(readFileSync(join(root, 'extension', 'manifest.json'), 'utf8'));

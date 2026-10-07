@@ -78,7 +78,7 @@ export function importPreview(csv, existing) {
   return { records, errors, skipped };
 }
 
-export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig, fetchAI = fetch } = {}) {
+export function createServer({ dataDir = process.env.TRACKER_DATA_DIR ? resolve(process.env.TRACKER_DATA_DIR) : join(root, '../data/tracker'), aiConfig, fetchAI = fetch } = {}) {
   mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   const snapshots = readdirSync(dataDir).filter(s => /^revision-\d+\.json$/.test(s)).sort((a, b) => Number(a.match(/\d+/)[0]) - Number(b.match(/\d+/)[0]));
   let state = snapshots.length ? JSON.parse(readFileSync(join(dataDir, snapshots.at(-1)), 'utf8')) : { records: [], revision: 0 };
@@ -450,6 +450,7 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         revision(body);
         const event = normalizeEvent(body.event);
         const before = state.events.find(item => item.id === event.id);
+        if (before && body.event.userNotes === undefined) event.userNotes = before.userNotes || '';
         if (event.id && !before) throw new Error('日程不存在，请刷新后重试');
         if (before && body.confirmed !== true) throw new Error('修改已有日程需要确认');
         if (event.recordId && !state.records.some(record => record.id === event.recordId)) throw new Error('关联的投递记录不存在');
@@ -466,6 +467,17 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         const at = new Date().toISOString();
         const updated = { ...event, updatedAt: at, history: [...(before?.history || []), { at, date: event.date, startTime: event.startTime, endTime: event.endTime, allDay: event.allDay, title: event.title, status: event.status }] };
         return send(200, save(state.records, before ? state.events.map(item => item.id === event.id ? updated : item) : [...state.events, updated]));
+      }
+      if (url.pathname === '/api/events/delete') {
+        revision(body);
+        if (body.confirmed !== true) throw new Error('删除日程需要确认');
+        const target = state.events.find(event => event.id === body.id);
+        const legacy = state.records.find(record => record.nextDate && `legacy-${record.id}` === body.id && !state.events.some(event => event.legacyKey === legacyEventKey(record)));
+        if (!target && !legacy) throw new Error('日程不存在，请刷新后重试');
+        // Clear a matching legacy source so a deleted converted event cannot reappear.
+        const records = state.records.map(record => (record === legacy || (target?.legacyKey && legacyEventKey(record) === target.legacyKey))
+          ? stamp({ ...record, nextDate: '', nextAction: '' }, record, '用户确认删除后续安排') : record);
+        return send(200, save(records, state.events.filter(event => event.id !== body.id)));
       }
       if (url.pathname === '/api/records/delete') {
         revision(body);
@@ -587,10 +599,8 @@ export function createServer({ dataDir = join(root, '../data/tracker'), aiConfig
         return send(200, await analyze(provider(), body, fetchAI));
       }
       if (url.pathname === '/api/ai/event') {
-        if (!provider().enabled || typeof body.text !== 'string' || !body.text.trim() || body.text.length > 12000) throw new Error('请先启用 AI，并粘贴邀约原文（最多 12000 字）');
-        const reply = await analyze(provider(), { consent: true, text: `请从下面这段招聘邀约中提取日程。${body.text}` }, fetchAI);
-        const value = parseLooseJson(reply.text);
-        const event = Array.isArray(value?.events) ? value.events[0] : value;
+        if (!provider().enabled || typeof body.text !== 'string' || (!body.text.trim() && !body.image) || body.text.length > 12000) throw new Error('请先启用 AI，并提供邀约文字或截图');
+        const event = await extractEvent(provider(), body.text, fetchAI, body.image || '');
         if (!event || typeof event !== 'object') throw new Error('AI 未返回日程 JSON');
         return send(200, { event: { title: event.title || '', recordId: event.recordId || '', kind: event.kind || '面试', date: event.date || '', allDay: event.allDay === true, startTime: event.startTime || '', endTime: event.endTime || '', location: event.location || '', notes: event.notes || '', status: event.status || '待进行' } });
       }
